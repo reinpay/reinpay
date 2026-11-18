@@ -1,0 +1,180 @@
+// Payment requests: decide by the rules, simulate on mainnet, keep a receipt, and send only when allowed.
+// The agent (MCP) can request and read. Only the owner's terminal can approve, reject, or change rules and payees.
+import { encodeFunctionData, erc20Abi, getAddress, isAddress, formatEther, createWalletClient } from "viem";
+import { publicClient, robinhoodChain, transport, token as tokenOf, TOKENS, txLink, addrLink, CHAIN_ID } from "./chain.js";
+import { loadConfig, saveConfig } from "./config.js";
+import { decide, findPayee, parseAmount, totals, limit, fmt } from "./rules.js";
+import { allReceipts, addReceipt, updateReceipt, getReceipt, view } from "./receipts.js";
+import { simulate, mismatch } from "./simulate.js";
+import { walletAddress, loadAccount, isUnlocked } from "./keystore.js";
+
+const FEE_MARGIN = 12n; // tenths: 1.2x the simulated gas
+
+export function requireWallet() {
+  const a = walletAddress();
+  if (!a) throw new Error("No Reinpay wallet on this computer yet. The owner runs `reinpay init` in their own terminal.");
+  return a;
+}
+
+export function buildTx(symbol, to, amountRaw) {
+  const t = TOKENS[symbol];
+  return t.address
+    ? { to: t.address, value: 0n, data: encodeFunctionData({ abi: erc20Abi, functionName: "transfer", args: [to, amountRaw] }) }
+    : { to, value: amountRaw, data: "0x" };
+}
+
+async function balances(address) {
+  const c = publicClient();
+  const [eth, usdg] = await Promise.all([
+    c.getBalance({ address }),
+    c.readContract({ address: TOKENS.USDG.address, abi: erc20Abi, functionName: "balanceOf", args: [address] }),
+  ]);
+  return { ETH: eth, USDG: usdg };
+}
+
+/** Simulate the payment and check the wallet can pay it plus the network fee. Returns { problem, sim, feeWei }. */
+async function check(from, symbol, payeeAddress, amountRaw) {
+  const c = publicClient();
+  const tx = buildTx(symbol, payeeAddress, amountRaw);
+  const [bal, gasPrice] = await Promise.all([balances(from), c.getGasPrice()]);
+  if (bal[symbol] < amountRaw) return { problem: `the wallet holds ${fmt(bal[symbol], symbol)}, less than ${fmt(amountRaw, symbol)}`, tx };
+  const sim = await simulate(from, tx);
+  const bad = mismatch(sim, { tokenAddress: TOKENS[symbol].address, to: payeeAddress, amount: amountRaw });
+  if (bad) return { problem: bad, tx, sim };
+  const feeWei = (sim.gasUsed * FEE_MARGIN * gasPrice) / 10n;
+  const ethNeeded = feeWei + (symbol === "ETH" ? amountRaw : 0n);
+  if (bal.ETH < ethNeeded) return { problem: `the wallet holds ${formatEther(bal.ETH)} ETH, not enough for the network fee of about ${formatEther(feeWei)} ETH${symbol === "ETH" ? " on top of the payment" : ""}`, tx, sim };
+  return { problem: null, tx, sim, feeWei };
+}
+
+const simView = (s, feeWei) => s && { ok: s.ok, block: s.block.toString(), gasUsed: s.gasUsed.toString(), estimatedFeeEth: feeWei != null ? formatEther(feeWei) : null, method: "eth_simulateV1" };
+
+async function sendNow(r, passphrase) {
+  const account = loadAccount(passphrase);
+  if (getAddress(account.address) !== getAddress(r.wallet)) throw new Error("The keystore address changed since this payment was requested. Request it again.");
+  updateReceipt(r.id, { status: "sending" }, "Signing and sending.");
+  const w = createWalletClient({ account, chain: robinhoodChain, transport: transport() });
+  let hash;
+  try {
+    hash = await w.sendTransaction({ to: r.tx.to, data: r.tx.data, value: BigInt(r.tx.value) });
+  } catch (e) {
+    return updateReceipt(r.id, { status: "failed" }, `Not sent: ${e.shortMessage || e.message}`);
+  }
+  updateReceipt(r.id, { txHash: hash, explorer: txLink(hash) }, `Sent ${hash}.`);
+  const rc = await publicClient().waitForTransactionReceipt({ hash, timeout: 120_000 }).catch(() => null);
+  if (!rc) return updateReceipt(r.id, { status: "sending" }, "Sent, but no receipt within 2 minutes. Check the explorer link.");
+  const fee = rc.gasUsed * rc.effectiveGasPrice;
+  return updateReceipt(r.id, { status: rc.status === "success" ? "sent" : "failed", block: rc.blockNumber.toString(), networkFeeEth: formatEther(fee) },
+    rc.status === "success" ? `Confirmed in block ${rc.blockNumber}.` : `Reverted in block ${rc.blockNumber}. Nothing was paid; the network fee was.`);
+}
+
+/** The agent's way to pay. Never signs unless the payment is inside every rule AND the owner turned on autoSend AND unlocked. */
+export async function requestPayment({ payee, amount, token = "USDG", memo = "" }, { by = "agent" } = {}) {
+  const from = requireWallet();
+  const cfg = loadConfig();
+  const symbol = tokenOf(token).symbol;
+  const amountRaw = parseAmount(amount, symbol);
+  const p = findPayee(cfg.payees, payee);
+  const base = { by, wallet: from, chainId: CHAIN_ID, payee: p ? p.name : String(payee ?? ""), payeeAddress: p ? p.address : null,
+    token: symbol, amount: fmt(amountRaw, symbol).split(" ")[0], amountRaw: amountRaw.toString(), memo: String(memo).slice(0, 200) };
+  const d = decide({ rules: cfg.rules, receipts: allReceipts(), request: { payee: p, token: symbol, amountRaw } });
+  if (d.status === "blocked") return view(addReceipt({ ...base, status: "blocked", rule: d.rule, reason: d.reason }));
+
+  const ch = await check(from, symbol, p.address, amountRaw);
+  if (ch.problem) return view(addReceipt({ ...base, status: "blocked", rule: "simulation", reason: `Simulated on mainnet: ${ch.problem}.`, simulation: simView(ch.sim) }));
+  const tx = { to: ch.tx.to, data: ch.tx.data, value: ch.tx.value.toString() };
+  const status = d.status === "needs_approval" ? "needs_approval" : cfg.rules.autoSend && isUnlocked() ? "sending" : "ready";
+  const reason = status === "ready" ? `${d.reason} Waiting for the owner because autoSend is ${cfg.rules.autoSend ? "on but the wallet is locked" : "off"}.` : d.reason;
+  const r = addReceipt({ ...base, status, rule: d.rule, reason, simulation: simView(ch.sim, ch.feeWei), tx });
+  if (status === "sending") return view(await sendNow(r));
+  return view(r);
+}
+
+/** Owner only (terminal): approve a waiting payment. Rules and the simulation are checked again first. */
+export async function approve(id, { passphrase } = {}) {
+  const r = getReceipt(id);
+  if (!r) throw new Error(`No receipt ${id}.`);
+  if (!["needs_approval", "ready"].includes(r.status)) throw new Error(`${r.id} is ${r.status}; only waiting payments can be approved.`);
+  const cfg = loadConfig();
+  const p = findPayee(cfg.payees, r.payeeAddress);
+  const d = decide({ rules: { ...cfg.rules, repeatGuardMinutes: 0, approveAbove: {} }, receipts: allReceipts(), request: { payee: p, token: r.token, amountRaw: BigInt(r.amountRaw) }, excludeId: r.id });
+  if (d.status === "blocked") return view(updateReceipt(r.id, { status: "blocked", rule: d.rule, reason: d.reason }, `Approval refused: ${d.reason}`));
+  const ch = await check(r.wallet, r.token, r.payeeAddress, BigInt(r.amountRaw));
+  if (ch.problem) return view(updateReceipt(r.id, { status: "blocked", rule: "simulation", reason: `Simulated again: ${ch.problem}.` }, "Approval refused by the second simulation."));
+  updateReceipt(r.id, { simulation: simView(ch.sim, ch.feeWei) }, "Approved by the owner; simulated again.");
+  return view(await sendNow(getReceipt(r.id), passphrase));
+}
+
+export function reject(id, why = "Rejected by the owner.") {
+  const r = getReceipt(id);
+  if (!r) throw new Error(`No receipt ${id}.`);
+  if (!["needs_approval", "ready"].includes(r.status)) throw new Error(`${r.id} is ${r.status}; only waiting payments can be rejected.`);
+  return view(updateReceipt(r.id, { status: "rejected" }, why));
+}
+
+export function listReceipts({ status, limit: n = 20 } = {}) {
+  let list = allReceipts().slice().reverse();
+  if (status) list = list.filter((r) => r.status === status);
+  return list.slice(0, Math.min(Math.max(Number(n) || 20, 1), 200)).map(view);
+}
+
+export function rulesView(now = Date.now()) {
+  const cfg = loadConfig();
+  const per = {};
+  for (const s of Object.keys(TOKENS)) {
+    const daily = limit(cfg.rules, "daily", s);
+    const { spent, held } = totals(allReceipts(), s, now);
+    per[s] = {
+      dailyBudget: daily === null ? null : fmt(daily, s), sentToday: fmt(spent, s), waitingToday: fmt(held, s),
+      leftToday: daily === null ? null : fmt(daily > spent + held ? daily - spent - held : 0n, s),
+      maxPerPayment: cfg.rules.maxPerPayment?.[s] != null ? fmt(limit(cfg.rules, "maxPerPayment", s), s) : null,
+      ownerApprovesAbove: cfg.rules.approveAbove?.[s] != null ? fmt(limit(cfg.rules, "approveAbove", s), s) : null,
+    };
+  }
+  return {
+    tokens: per, repeatGuardMinutes: cfg.rules.repeatGuardMinutes, autoSend: !!cfg.rules.autoSend, walletUnlocked: isUnlocked(),
+    payees: cfg.payees.filter((p) => !p.disabled).map((p) => ({ name: p.name, address: p.address, tokens: p.tokens || Object.keys(TOKENS), note: p.note || null })),
+    note: "Only the owner can change rules or payees, and only in their own terminal. Payments that need approval wait for `reinpay approve`.",
+  };
+}
+
+export async function walletStatus() {
+  const a = requireWallet();
+  const b = await balances(a);
+  return { address: a, chainId: CHAIN_ID, explorer: addrLink(a), balances: { ETH: formatEther(b.ETH), USDG: fmt(b.USDG, "USDG").split(" ")[0] }, ...rulesView() };
+}
+
+// ---- payees (owner only, from the CLI) ----
+export async function addPayee({ name, address, tokens, note, maxPerPayment }) {
+  if (!/^[\w .'-]{2,40}$/.test(String(name || ""))) throw new Error("Payee name: 2-40 letters, digits, spaces, dots, dashes or apostrophes.");
+  if (!isAddress(String(address || ""))) throw new Error(`"${address}" is not a valid 0x address.`);
+  const a = getAddress(address);
+  if (/^0x0{40}$/i.test(a)) throw new Error("Refusing the zero address.");
+  if (Object.values(TOKENS).some((t) => t.address && t.address === a)) throw new Error("That is a token contract. Tokens sent there are usually lost.");
+  const cfg = loadConfig();
+  if (cfg.payees.some((p) => p.name.toLowerCase() === name.toLowerCase())) throw new Error(`A payee named "${name}" already exists.`);
+  if (cfg.payees.some((p) => getAddress(p.address) === a)) throw new Error(`${a} is already on the list.`);
+  const code = await publicClient().getCode({ address: a }).catch(() => null);
+  const p = { name, address: a, ...(tokens ? { tokens } : {}), ...(note ? { note } : {}), ...(maxPerPayment ? { maxPerPayment } : {}), isContract: !!code && code !== "0x", addedAt: new Date().toISOString() };
+  cfg.payees.push(p);
+  saveConfig(cfg);
+  return p;
+}
+
+export function setPayee(name, patch) {
+  const cfg = loadConfig();
+  const p = findPayee(cfg.payees, name);
+  if (!p) throw new Error(`No payee "${name}".`);
+  Object.assign(p, patch);
+  saveConfig(cfg);
+  return p;
+}
+
+export function removePayee(name) {
+  const cfg = loadConfig();
+  const p = findPayee(cfg.payees, name);
+  if (!p) throw new Error(`No payee "${name}".`);
+  cfg.payees = cfg.payees.filter((x) => x !== p);
+  saveConfig(cfg);
+  return p;
+}
