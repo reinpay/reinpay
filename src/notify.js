@@ -1,6 +1,7 @@
 // Tell the owner when a payment is waiting for them. Off unless the owner sets it up in their own terminal.
 // Two kinds: a Telegram bot message (bot token + chat id), or a JSON POST to an https webhook the owner controls.
 // A failed notification never changes a payment: it is logged on the receipt and that is all.
+import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { loadConfig } from "./config.js";
 
 const TIMEOUT_MS = 5_000;
@@ -17,6 +18,18 @@ export function message(r) {
   ].join("\n");
 }
 
+export const newSecret = () => randomBytes(32).toString("hex");
+
+/** Webhook signature: hex HMAC-SHA256 of "<timestamp>.<body>" with the secret, sent as "sha256=<hex>". */
+export const signWebhook = (secret, ts, body) => "sha256=" + createHmac("sha256", secret).update(`${ts}.${body}`).digest("hex");
+
+/** For the receiving server: true only for a matching signature made within `toleranceSec` of now. */
+export function verifyWebhook(secret, ts, body, signature, { now = Date.now(), toleranceSec = 300 } = {}) {
+  if (!secret || !ts || !signature || Math.abs(now / 1000 - Number(ts)) > toleranceSec) return false;
+  const want = Buffer.from(signWebhook(secret, ts, body)), got = Buffer.from(String(signature));
+  return want.length === got.length && timingSafeEqual(want, got);
+}
+
 /** Validate a notify config from the CLI. Returns the object to store, or throws with a plain reason. */
 export function parseNotify(kind, a, b) {
   if (kind === "off") return null;
@@ -29,7 +42,7 @@ export function parseNotify(kind, a, b) {
     let u;
     try { u = new URL(String(a)); } catch { throw new Error("Webhook must be a full URL."); }
     if (u.protocol !== "https:") throw new Error("Webhook must use https.");
-    return { type: "webhook", url: u.toString() };
+    return { type: "webhook", url: u.toString(), secret: newSecret() };
   }
   throw new Error("Usage: reinpay notify telegram <bot-token> <chat-id> | webhook <https-url> | off | test");
 }
@@ -51,7 +64,9 @@ export async function notifyOwner(r, { cfg = loadConfig(), fetch: f = globalThis
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), TIMEOUT_MS);
   try {
-    const res = await f(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body), signal: ctl.signal });
+    const raw = JSON.stringify(body), headers = { "content-type": "application/json" };
+    if (n.type === "webhook" && n.secret) { const ts = String(Math.floor(Date.now() / 1000)); headers["x-reinpay-timestamp"] = ts; headers["x-reinpay-signature"] = signWebhook(n.secret, ts, raw); }
+    const res = await f(url, { method: "POST", headers, body: raw, signal: ctl.signal });
     return res.ok ? { ok: true, detail: `${n.type} ${res.status}` } : { ok: false, detail: `${n.type} answered ${res.status}` };
   } catch (e) {
     return { ok: false, detail: `${n.type}: ${e.name === "AbortError" ? "no answer in 5 s" : e.message}` };

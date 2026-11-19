@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.10.0 (unreleased): working with others
+
+- `reinpay payee export [--out=file.json]` and `reinpay payee import <file>`: share a payee list signed with your wallet key. Import checks the signature, says who signed it (and warns when it is not this wallet), and adds only payees that pass the same checks as `payee add`; duplicates, taken names, expired payees and lookalike addresses are skipped and listed, and token contracts are still refused.
+- Signed webhooks: a webhook set up with `reinpay notify webhook <url>` gets a secret, printed once. Every POST carries `x-reinpay-timestamp` and `x-reinpay-signature` (`sha256=` HMAC-SHA256 of `<timestamp>.<body>`), so the receiving server can reject anything forged or replayed. `reinpay notify secret` rotates it. Webhooks set up before 0.10 keep working unsigned until you run it.
+- `reinpay mcp --read-only`: the MCP server without `request_payment`, for agents that should only read, dry-run and verify. `freeze_wallet` stays available.
+- Tests: 22 payee-list, webhook and read-only checks offline, plus 4 new live mainnet checks. All passing. No transaction is signed or sent.
+
 ## 0.9.0 (unreleased): plan and move
 
 - Dry run: `reinpay check <payee> <amount> [token]` and the new MCP tool `check_payment` say what would happen to a payment right now (blocked with the rule, waiting for you, ready or sent), simulated on mainnet when the rules would let it through. No receipt, nothing counted against a budget, nothing signed, and the circuit breaker does not count it.

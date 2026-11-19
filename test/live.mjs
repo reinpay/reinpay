@@ -273,6 +273,22 @@ const stMine = ST.buildStatement([pubRec], { wallet: stranger.address, days: 1 }
 const cMine = await ST.checkStatement(await ST.signStatement(stMine, stranger));
 check("statement check: signed by its wallet, but claiming someone else's payment, fails on the chain", cMine.signature.ok && !cMine.ok && cMine.payments[0].failed.includes("sent from your wallet"));
 
+// ---- 0.10: read-only MCP and a signed payee list ----
+const ro = new Client({ name: "reinpay-live-test-ro", version: "0.0.0" });
+await ro.connect(new StdioClientTransport({ command: process.execPath, args: [fileURLToPath(new URL("../bin/reinpay.js", import.meta.url)), "mcp", "--read-only"], env: { ...process.env, REINPAY_HOME: home } }));
+const roNames = (await ro.listTools()).tools.map((t) => t.name).sort();
+check(`read-only MCP: ${roNames.length} tools, no request_payment`, roNames.length === 7 && !roNames.includes("request_payment"), roNames.join(", "));
+const roTry = await ro.callTool({ name: "request_payment", arguments: { payee: "Test payee", amount: "0.0001", token: "ETH", memo: "x" } }).catch((e) => ({ isError: true, content: [{ text: e.message }] }));
+check("read-only MCP: asking for a payment is refused", !!roTry.isError);
+await ro.close();
+const SH = await import("../src/payeeshare.js");
+const lister = privateKeyToAccount(generatePrivateKey());
+const shared = await SH.exportPayees([{ name: "Shared burn", address: getAddress("0x000000000000000000000000000000000000dEaD") }, { name: "USDG contract", address: U }], lister);
+const sp = SH.planImport(shared, C.loadConfig().payees, me);
+check("payee import: the burn address is already on the list, so it is skipped", sp.skip.some((x) => x.name === "Shared burn"));
+let tokErr = null; for (const p of sp.add) { try { await P.addPayee(p); } catch (e) { tokErr = e; } }
+check("payee import: a token contract in a shared list is still refused on mainnet", /contract of USDG/.test(tokErr?.message || ""), tokErr?.message?.slice(0, 60));
+
 const D = await import("../src/doctor.js");
 const dr = await D.doctor();
 const dget = (n) => dr.find((x) => x.name === n);

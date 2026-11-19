@@ -83,7 +83,15 @@ reinpay digest                    # a short summary to your Telegram or webhook 
 reinpay check "Weather API" 3     # dry run: what would happen now (nothing recorded or signed)
 reinpay grant USDG 20 --for=2h    # extra budget for one task, gone when the time is up
 reinpay backup                    # move this wallet: key (still encrypted), rules, payees, receipts
+reinpay payee export              # your payee list, signed, to share with a teammate or another profile
+reinpay payee import list.json    # add payees from a signed list, after the usual checks
 ```
+
+### Working with others
+
+- `reinpay payee export [--out=file.json]` writes your active payees (names, addresses, tokens and limits) to a file signed with your wallet key. `reinpay payee import <file>` (terminal only) checks the signature and shows who signed it, then adds only payees that pass the same checks as `payee add`. Addresses already on your list, names you already use, expired payees and anything that starts and ends like a payee you have (or your wallet) are skipped and listed. Token contracts are still refused.
+- Webhook notifications are signed. `reinpay notify webhook <url>` prints a secret once; each POST carries `x-reinpay-timestamp` and `x-reinpay-signature: sha256=<hex>`, the HMAC-SHA256 of `<timestamp>.<body>`. Check it on your server and refuse anything older than five minutes. `reinpay notify secret` makes a new secret.
+- `reinpay mcp --read-only` runs the MCP server without `request_payment`, for agents that should only read the wallet, check payments and verify receipts. They can still pull the brake with `freeze_wallet`.
 
 ### Dry runs and grants
 
@@ -219,7 +227,7 @@ The repeat guard is 10 minutes, and `autosend` is off. A token with no daily bud
 npm test
 ```
 
-`test/rules.test.mjs` checks every rule offline, `test/lock.test.mjs` the spend lock (including two processes), `test/report.test.mjs` the spending report, `test/notify.test.mjs` the owner notifications, `test/csv.test.mjs` the CSV export and `test/profile.test.mjs` the profiles, `test/seal.test.mjs` the config seal and unlock, `test/guard.test.mjs` the lookalike guard, `test/verify.test.mjs` the on-chain receipt check and `test/doctor.test.mjs` the checkup and `test/freeze.test.mjs` the freeze, the circuit breaker and expiring payees, `test/paper.test.mjs` statements, the first-payment rule and the digest, and `test/plan.test.mjs` grants, dry runs and backup/restore. `test/live.mjs` runs on mainnet:
+`test/rules.test.mjs` checks every rule offline, `test/lock.test.mjs` the spend lock (including two processes), `test/report.test.mjs` the spending report, `test/notify.test.mjs` the owner notifications, `test/csv.test.mjs` the CSV export and `test/profile.test.mjs` the profiles, `test/seal.test.mjs` the config seal and unlock, `test/guard.test.mjs` the lookalike guard, `test/verify.test.mjs` the on-chain receipt check and `test/doctor.test.mjs` the checkup and `test/freeze.test.mjs` the freeze, the circuit breaker and expiring payees, `test/paper.test.mjs` statements, the first-payment rule and the digest, `test/plan.test.mjs` grants, dry runs and backup/restore, and `test/share.test.mjs` shared payee lists, signed webhooks and read-only MCP. `test/live.mjs` runs on mainnet:
 
 - USDG transfer simulations from a public holder, and tampered ones that must be refused;
 - the full flow with a throwaway wallet that has a pretend ETH balance only inside the simulation;
@@ -231,7 +239,8 @@ npm test
 - `doctor` against the real RPC, and the lookalike guard;
 - the agent freezing the wallet over MCP, and its next request blocked;
 - statements built from a real public payment: one with the wrong signer and one claiming someone else's payment, both refused;
-- a dry run simulated on mainnet that records nothing, and `check_payment` over MCP.
+- a dry run simulated on mainnet that records nothing, and `check_payment` over MCP;
+- the read-only MCP server over stdio, and a shared payee list whose token contract is still refused.
 
 No transaction is signed or sent.
 

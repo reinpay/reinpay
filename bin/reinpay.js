@@ -12,7 +12,7 @@ const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url),
 
 const HELP = `reinpay ${pkg.version} - a wallet for AI agents that only spends inside your rules (Robinhood Chain mainnet, chain id 4663)
 
-  reinpay mcp                              Run the MCP server on stdio (your agent host starts this)
+  reinpay mcp [--read-only]                Run the MCP server on stdio (your agent host starts this); --read-only leaves out request_payment
   reinpay profiles                         List wallets on this computer (one per agent)
   --profile=<name>                         Use that agent's wallet for any command, e.g. reinpay init --profile=research
   reinpay init [--import]                  Create (or import) the encrypted wallet. Terminal only.
@@ -34,6 +34,8 @@ const HELP = `reinpay ${pkg.version} - a wallet for AI agents that only spends i
   reinpay autosend <on|off>                Send payments that are inside every rule without asking (needs unlock)
   reinpay payee add <name> <0xaddress> [--tokens=USDG,ETH] [--note=...] [--until=30d]
   reinpay payee until <name> <30d|12h|off> A payee that expires on its own
+  reinpay payee export [--out=file.json]   Your payee list, signed with your wallet key, to share
+  reinpay payee import <file.json>         Add payees from a signed list, after the same checks as payee add
   reinpay payee list | remove <name> | off <name> | on <name>
   reinpay payee limit <name> <daily|max> <USDG|ETH> <amount|off>   A payee's own daily budget or max per payment
   reinpay pending                          Payments waiting for you
@@ -49,7 +51,8 @@ const HELP = `reinpay ${pkg.version} - a wallet for AI agents that only spends i
   reinpay doctor [--json]                  Check this computer's setup: Node, RPC, chain, wallet, seal, unlock, gas money, payees, budgets
   reinpay token add <0xaddress> | list | remove <SYMBOL>
                                            Spend another ERC-20 (checked on-chain and on Sourcify first)
-  reinpay notify telegram <bot-token> <chat-id> | webhook <https-url> | off | test
+  reinpay notify telegram <bot-token> <chat-id> | webhook <https-url> | secret | off | test
+                                           Webhooks are signed: x-reinpay-signature (HMAC-SHA256); secret makes a new key
                                            Tell you when a payment waits for your approval
   reinpay report [--days=7] [--json | --csv]   What was sent, waiting and blocked, per day, with top payees
   reinpay export                           Show the private key. Terminal only.
@@ -87,7 +90,7 @@ async function main() {
   if (opt("profile")) process.env.REINPAY_PROFILE = opt("profile");
   if (!cmd || cmd === "help" || cmd === "--help" || cmd === "-h") return console.log(HELP);
   if (cmd === "--version" || cmd === "-v" || cmd === "version") return console.log(pkg.version);
-  if (cmd === "mcp") { const { runServer } = await import("../src/server.js"); return runServer(); }
+  if (cmd === "mcp") { const { runServer } = await import("../src/server.js"); return runServer({ readOnly: flags.has("--read-only") }); }
 
   if (cmd === "profiles") {
     const { readdirSync, existsSync, readFileSync: rf } = await import("node:fs");
@@ -194,7 +197,38 @@ async function main() {
   if (cmd === "payee") {
     const [sub, name, address] = pos;
     if (sub === "list" || !sub) return console.log(JSON.stringify(C.loadConfig().payees, null, 2));
+    if (sub === "export") {
+      const { exportPayees } = await import("../src/payeeshare.js");
+      const { writeFileSync: wf, existsSync: ex } = await import("node:fs");
+      if (!K.isUnlocked()) requireTTY("payee export");
+      const f = await exportPayees(C.loadConfig().payees, K.loadAccount(K.isUnlocked() ? undefined : await ask("Passphrase to sign the list (hidden): ", { hidden: true })));
+      const out = opt("out") || "reinpay-payees.json";
+      if (ex(out) && !flags.has("--force")) throw new Error(`${out} already exists. Use --out=<file> or --force.`);
+      wf(out, JSON.stringify(f, null, 2) + "\n");
+      return console.log(`Wrote ${out}: ${f.payees.length} payee${f.payees.length === 1 ? "" : "s"}, signed by ${f.by}.`);
+    }
     requireTTY("payee " + sub);
+    if (sub === "import") {
+      const S = await import("../src/payeeshare.js");
+      const { readFileSync: rf } = await import("node:fs");
+      if (!name) throw new Error("Usage: reinpay payee import <file.json>");
+      let f; try { f = JSON.parse(rf(name, "utf8")); } catch { throw new Error(`${name} is not a readable JSON file.`); }
+      const sig = await S.checkPayeeFile(f);
+      if (!sig.ok) throw new Error(`Not imported: ${sig.reason}.`);
+      const mine = K.walletAddress();
+      const plan = S.planImport(f, C.loadConfig().payees, mine);
+      console.log(`Signed by ${sig.signer}${mine && sig.signer === mine ? " (this wallet)" : " (NOT this wallet: only go on if you trust who sent it)"} on ${f.at}.`);
+      for (const p of plan.add) console.log(`  + ${p.name}  ${p.address}${p.tokens ? "  " + p.tokens.join(",") : ""}`);
+      for (const x of plan.skip) console.log(`  - ${x.name}: ${x.why}`);
+      if (!plan.add.length) { console.log("Nothing to add."); process.exit(0); }
+      if ((await ask(`Add these ${plan.add.length} payee${plan.add.length === 1 ? "" : "s"}? Type yes: `)).trim().toLowerCase() !== "yes") { console.log("Nothing added."); process.exit(0); }
+      let added = 0;
+      for (const p of plan.add) {
+        try { await P.addPayee({ name: p.name, address: p.address, tokens: p.tokens, note: p.note, maxPerPayment: p.maxPerPayment }); if (p.daily || p.expiresAt) P.setPayee(p.name, { ...(p.daily ? { daily: p.daily } : {}), ...(p.expiresAt ? { expiresAt: p.expiresAt } : {}) }); added++; }
+        catch (e) { console.log(`  ! ${p.name}: ${e.message}`); }
+      }
+      return console.log(`Added ${added} of ${plan.add.length}.`);
+    }
     if (sub === "add") {
       const tokens = opt("tokens") ? opt("tokens").toUpperCase().split(",") : undefined;
       let p;
@@ -221,7 +255,7 @@ async function main() {
       const p = P.setPayeeLimit(name, kind, tok, amount);
       return console.log(`${p.name}: daily ${JSON.stringify(p.daily || {})}, max per payment ${JSON.stringify(p.maxPerPayment || {})}.`);
     }
-    throw new Error("Usage: reinpay payee <add|list|remove|off|on|limit|until>");
+    throw new Error("Usage: reinpay payee <add|list|remove|off|on|limit|until|export|import>");
   }
   if (cmd === "pending") {
     const list = [...P.listReceipts({ status: "needs_approval", limit: 200 }), ...P.listReceipts({ status: "ready", limit: 200 })];
@@ -242,6 +276,12 @@ async function main() {
     requireTTY("notify");
     const { parseNotify, notifyOwner } = await import("../src/notify.js");
     const cfg = C.loadConfig();
+    if (pos[0] === "secret") {
+      if (cfg.notify?.type !== "webhook") throw new Error("Only webhooks are signed. Set one up first: reinpay notify webhook <https-url>");
+      cfg.notify = { ...cfg.notify, secret: (await import("../src/notify.js")).newSecret() };
+      C.saveConfig(cfg);
+      return console.log(`New webhook signing secret (shown once; put it in your receiving server):\n${cfg.notify.secret}`);
+    }
     if (pos[0] === "test") {
       if (!cfg.notify) throw new Error("Notifications are off. Set them up first: reinpay notify telegram <bot-token> <chat-id>");
       const n = await notifyOwner({ id: "RP-TEST", amount: "1", token: "USDG", payee: "Test", memo: "test message", rule: "test", reason: "This is a test from reinpay notify test.", status: "needs_approval" }, { cfg });
@@ -250,7 +290,7 @@ async function main() {
     const n = parseNotify(pos[0], pos[1], pos[2]);
     if (n) cfg.notify = n; else delete cfg.notify;
     C.saveConfig(cfg);
-    return console.log(n ? `Notifications on (${n.type}). Run reinpay notify test to check.` : "Notifications off.");
+    return console.log(n ? `Notifications on (${n.type}). Run reinpay notify test to check.${n.secret ? `\nWebhook signing secret (shown once; your server checks the x-reinpay-signature header with it):\n${n.secret}` : ""}` : "Notifications off.");
   }
   if (cmd === "report") {
     const { spendingReport, reportText } = await import("../src/report.js");
@@ -382,7 +422,7 @@ async function main() {
 }
 
 // Commands that change rules, payees, tokens or notifications seal the config with the wallet key afterwards.
-const MUTATING = ["rule", "autosend"].includes(cmd) || (cmd === "grant" && pos[0] && pos[0] !== "list") || (cmd === "notify" && pos[0] !== "test") || (cmd === "payee" && ["add", "remove", "off", "on", "limit", "until"].includes(pos[0])) || (cmd === "token" && ["add", "remove"].includes(pos[0]));
+const MUTATING = ["rule", "autosend"].includes(cmd) || (cmd === "grant" && pos[0] && pos[0] !== "list") || (cmd === "notify" && pos[0] !== "test") || (cmd === "payee" && ["add", "remove", "off", "on", "limit", "until", "import"].includes(pos[0])) || (cmd === "token" && ["add", "remove"].includes(pos[0]));
 async function reseal(passphrase) {
   const K = await import("../src/keystore.js"), C = await import("../src/config.js"), { sealConfig } = await import("../src/seal.js");
   const pass = passphrase ?? (K.isUnlocked() ? undefined : await ask("Passphrase to seal your rules (hidden): ", { hidden: true }));
