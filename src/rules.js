@@ -115,6 +115,9 @@ export function decide({ rules, receipts, request, now = Date.now(), excludeId =
       && r.createdAt >= since && (DONE_SPENT.includes(r.status) || OPEN.includes(r.status)));
     if (dup) return { status: "needs_approval", rule: "repeat guard", reason: `Same payee, token and amount as ${dup.id} within ${guard} minutes. Held in case the agent is repeating itself.` };
   }
+  if (rules.firstPayment === "ask" && !list.some((r) => r.payeeAddress === payee.address && DONE_SPENT.includes(r.status))) {
+    return { status: "needs_approval", rule: "first payment", reason: `This would be the first payment to ${payee.name}. You asked to approve every first payment yourself.` };
+  }
   const line = limit(rules, "approveAbove", symbol);
   if (line !== null && amountRaw > line) return { status: "needs_approval", rule: "approval line", reason: `${fmt(amountRaw, symbol)} is above your approval line of ${fmt(line, symbol)}.` };
   return { status: "allowed", rule: "within rules", reason: "Inside every rule." };

@@ -76,7 +76,19 @@ reinpay verify RP-00012           # read a sent payment back from the chain and 
 reinpay doctor                    # check the whole setup: Node, RPC, chain, wallet, seal, unlock, gas money, brakes, payees, budgets
 reinpay freeze "checking a bill"  # stop every payment now; reinpay unfreeze starts again
 reinpay payee add "Trial API" 0xAddress --until=30d   # a payee that expires on its own
+reinpay rule first-payment ask    # the first payment to every payee waits for you
+reinpay statement --days=30       # a spending statement signed with your wallet key
+reinpay statement check file.json # check anyone's statement against the chain
+reinpay digest                    # a short summary to your Telegram or webhook (put it on a daily schedule)
 ```
+
+### Statements
+
+`reinpay statement` writes every sent payment in a period (30 days by default) to a JSON file, with totals per token, and signs it with the wallet's key. Share it with whoever needs to see what your agent spent. `reinpay statement check <file>` needs no wallet: it confirms the file was signed by the wallet it names, that nothing was added, removed or changed after signing, and reads every payment back from Robinhood Chain. Memos are included, so read the file before you share it.
+
+### Digest
+
+`reinpay digest` sends today's totals, what is waiting for you and what blocked most, to the Telegram or webhook you set up with `reinpay notify` (`--days=7` for a week, `--dry` to print it instead). It is read-only, so it is safe to run from cron or Task Scheduler, for example every evening: `0 20 * * * reinpay digest`.
 
 ### Brakes
 
@@ -193,7 +205,7 @@ The repeat guard is 10 minutes, and `autosend` is off. A token with no daily bud
 npm test
 ```
 
-`test/rules.test.mjs` checks every rule offline, `test/lock.test.mjs` the spend lock (including two processes), `test/report.test.mjs` the spending report, `test/notify.test.mjs` the owner notifications, `test/csv.test.mjs` the CSV export and `test/profile.test.mjs` the profiles, `test/seal.test.mjs` the config seal and unlock, `test/guard.test.mjs` the lookalike guard, `test/verify.test.mjs` the on-chain receipt check and `test/doctor.test.mjs` the checkup and `test/freeze.test.mjs` the freeze, the circuit breaker and expiring payees. `test/live.mjs` runs on mainnet:
+`test/rules.test.mjs` checks every rule offline, `test/lock.test.mjs` the spend lock (including two processes), `test/report.test.mjs` the spending report, `test/notify.test.mjs` the owner notifications, `test/csv.test.mjs` the CSV export and `test/profile.test.mjs` the profiles, `test/seal.test.mjs` the config seal and unlock, `test/guard.test.mjs` the lookalike guard, `test/verify.test.mjs` the on-chain receipt check and `test/doctor.test.mjs` the checkup and `test/freeze.test.mjs` the freeze, the circuit breaker and expiring payees, and `test/paper.test.mjs` statements, the first-payment rule and the digest. `test/live.mjs` runs on mainnet:
 
 - USDG transfer simulations from a public holder, and tampered ones that must be refused;
 - the full flow with a throwaway wallet that has a pretend ETH balance only inside the simulation;
@@ -203,9 +215,10 @@ npm test
 - the MCP server over stdio;
 - `verify` against a real public token transfer and a real ETH payment from the last few hundred blocks, and altered copies that must not match;
 - `doctor` against the real RPC, and the lookalike guard;
-- the agent freezing the wallet over MCP, and its next request blocked.
+- the agent freezing the wallet over MCP, and its next request blocked;
+- statements built from a real public payment: one with the wrong signer and one claiming someone else's payment, both refused.
 
-Nothing is signed or sent.
+No transaction is signed or sent.
 
 ## Official token
 

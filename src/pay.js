@@ -210,6 +210,7 @@ export function rulesView(now = Date.now()) {
   }
   return {
     frozen: frozen(), circuitBreaker: breakerOf(cfg.rules) ? `freezes after ${breakerOf(cfg.rules).count} blocked requests in ${breakerOf(cfg.rules).minutes} minutes` : "off",
+    firstPaymentNeedsOwner: cfg.rules.firstPayment === "ask",
     tokens: per, repeatGuardMinutes: cfg.rules.repeatGuardMinutes, autoSend: !!cfg.rules.autoSend, walletUnlocked: isUnlocked(),
     ownerNotifiedBy: cfg.notify?.type || null,
     payees: cfg.payees.filter((p) => !p.disabled && !(p.expiresAt && Date.parse(p.expiresAt) <= now)).map((p) => {

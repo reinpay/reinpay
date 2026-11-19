@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.8.0 (unreleased): proof and paperwork
+
+- `reinpay statement [--days=30] [--out=file.json]`: every sent payment in the period, with totals per token, signed with the wallet's own key. `reinpay statement check <file>` needs no wallet: it checks that the wallet named in the file signed it, that it was not changed after signing, and reads every payment back from Robinhood Chain. A statement signed by someone else, or listing a payment the wallet did not make, is refused.
+- First-payment rule: `reinpay rule first-payment ask` makes the first payment to every payee wait for the owner, even inside the approval line. Hard limits still apply first. `off` turns it off (the default).
+- `reinpay digest [--days=1] [--dry]`: a short summary (sent, waiting, blocked, what blocked most, and a freeze if there is one) sent to the owner's Telegram or webhook. Read-only, for a daily schedule.
+- `get_rules` shows whether first payments need the owner.
+- Tests: 23 statement, first-payment and digest checks offline, plus 3 new live mainnet checks. All passing. No transaction is signed or sent.
+
 ## 0.7.0 (unreleased): brakes
 
 - `reinpay freeze [reason]`: one command stops every payment. Requests are blocked with the rule `frozen`, autosend stops even for a payment already decided, and `reinpay approve` refuses. `reinpay unfreeze` is terminal only and asks whether you checked your receipts. The state is kept in `frozen.json`, apart from the sealed config; an unreadable file counts as frozen.

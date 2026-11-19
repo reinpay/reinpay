@@ -25,6 +25,7 @@ const HELP = `reinpay ${pkg.version} - a wallet for AI agents that only spends i
                                            (weekly and monthly accept "off"; weeks start on Monday, local time)
   reinpay rule repeat-guard <minutes>      Hold repeats of the same payment for that long (0 turns it off)
   reinpay rule breaker <count> <minutes> | off   Freeze when the agent is blocked that often (default 5 in 10 minutes)
+  reinpay rule first-payment <ask|off>     Make the first payment to every payee wait for you
   reinpay freeze [reason]                  Stop every payment now (requests, autosend, approvals)
   reinpay unfreeze                         Start again after checking reinpay receipts. Terminal only.
   reinpay autosend <on|off>                Send payments that are inside every rule without asking (needs unlock)
@@ -37,6 +38,9 @@ const HELP = `reinpay ${pkg.version} - a wallet for AI agents that only spends i
   reinpay reject <RP-id>                   Refuse a waiting payment
   reinpay receipts [--status=sent] [--json | --csv]
   reinpay verify <RP-id> | --all [--json]  Read sent payments back from the chain and check them against their receipts
+  reinpay statement [--days=30] [--out=file.json]   A spending statement signed with your wallet key
+  reinpay statement check <file.json>      Check anyone's statement: the signature, then every payment on the chain
+  reinpay digest [--days=1] [--dry]        Send a short spending summary to your Telegram or webhook (for a daily schedule)
   reinpay doctor [--json]                  Check this computer's setup: Node, RPC, chain, wallet, seal, unlock, gas money, payees, budgets
   reinpay token add <0xaddress> | list | remove <SYMBOL>
                                            Spend another ERC-20 (checked on-chain and on Sourcify first)
@@ -150,7 +154,10 @@ async function main() {
     requireTTY("rule");
     const cfg = C.loadConfig();
     const [name, a1, a2] = pos;
-    if (name === "breaker") {
+    if (name === "first-payment") {
+      if (!["ask", "off"].includes(String(a1))) throw new Error("Usage: reinpay rule first-payment <ask|off>");
+      if (a1 === "ask") cfg.rules.firstPayment = "ask"; else delete cfg.rules.firstPayment;
+    } else if (name === "breaker") {
       if (String(a1).toLowerCase() === "off") cfg.rules.breaker = "off";
       else {
         const n = Number(a1), m = Number(a2);
@@ -271,6 +278,40 @@ async function main() {
     else if (!res.length) console.log("No sent payments to check yet.");
     else for (const v of res) console.log(v.reason ? `- ${v.id}: ${v.reason}` : `${v.ok ? "✓" : "✕"} ${v.id} ${v.ok ? "matches the chain" : "does NOT match the chain"}  ${v.explorer}\n${v.checks.map((c) => `    ${c.ok ? "✓" : "✕"} ${c.name}: ${c.detail}`).join("\n")}`);
     if (res.some((v) => v.checks && !v.ok)) process.exitCode = 1;
+    return;
+  }
+  if (cmd === "statement") {
+    const S = await import("../src/statement.js");
+    const { readFileSync: rf, writeFileSync: wf, existsSync: ex } = await import("node:fs");
+    if (pos[0] === "check") {
+      if (!pos[1]) throw new Error("Usage: reinpay statement check <file.json>");
+      let st; try { st = JSON.parse(rf(pos[1], "utf8")); } catch { throw new Error(`${pos[1]} is not a readable JSON file.`); }
+      const res = await S.checkStatement(st);
+      console.log(flags.has("--json") ? JSON.stringify(res, null, 2) : S.statementCheckText(st, res));
+      if (!res.ok) process.exitCode = 1;
+      return;
+    }
+    const { allReceipts } = await import("../src/receipts.js");
+    const st = S.buildStatement(allReceipts(), { wallet: P.requireWallet(), days: opt("days") || 30 });
+    if (!K.isUnlocked()) requireTTY("statement");
+    const signed = await S.signStatement(st, K.loadAccount(K.isUnlocked() ? undefined : await ask("Passphrase to sign the statement (hidden): ", { hidden: true })));
+    const out = opt("out") || `reinpay-statement-${st.from}-to-${st.to}.json`;
+    if (ex(out) && !flags.has("--force")) throw new Error(`${out} already exists. Use --out=<file> or --force.`);
+    wf(out, JSON.stringify(signed, null, 2) + "\n");
+    return console.log(`Wrote ${out}: ${st.count} sent payment${st.count === 1 ? "" : "s"} from ${st.from} to ${st.to}, totals ${JSON.stringify(st.totals)}, signed by ${signed.signature.by}.\nAnyone can check it with: reinpay statement check ${out}`);
+  }
+  if (cmd === "digest") {
+    const { currentDigest } = await import("../src/digest.js");
+    const { allReceipts } = await import("../src/receipts.js");
+    (await import("../src/chain.js")).syncTokens();
+    const text = currentDigest(allReceipts(), { days: opt("days") || 1 });
+    if (flags.has("--dry")) return console.log(text);
+    const cfg = C.loadConfig();
+    if (!cfg.notify) throw new Error("Notifications are off, so there is nowhere to send the digest. Set them up with reinpay notify, or use --dry to print it.");
+    const { notifyOwner } = await import("../src/notify.js");
+    const n = await notifyOwner({ id: "DIGEST", status: "digest" }, { cfg, text, event: "digest" });
+    console.log(n.ok ? `Digest sent (${n.detail}).` : `Digest not sent: ${n.detail}`);
+    if (!n.ok) process.exitCode = 1;
     return;
   }
   if (cmd === "doctor") {

@@ -254,6 +254,20 @@ if (ethTx) {
 } else check("found a recent plain ETH payment", false);
 check("verify: a made-up transaction hash does not match and does not throw", !(await V.verifyReceipt({ ...real, txHash: "0x" + "ab".repeat(32) })).ok);
 
+// ---- 0.8: a signed statement checked against the same real public payment ----
+const ST = await import("../src/statement.js");
+const { privateKeyToAccount } = await import("viem/accounts");
+const stranger = privateKeyToAccount(generatePrivateKey());
+const pubRec = { ...real, by: "agent", createdAt: Date.now(), payee: "Public payee", amount: "x" };
+const stPub = ST.buildStatement([pubRec], { wallet: real.wallet, days: 1 });
+const stPubSigned = { ...stPub, signature: { by: stranger.address, sig: await stranger.signMessage({ message: ST.statementMessage(stPub) }) } };
+const cPub = await ST.checkStatement(stPubSigned);
+check("statement check: the real payment in it matches the chain", cPub.payments.length === 1 && cPub.payments[0].ok);
+check("statement check: but it was not signed by that wallet, so the statement fails", !cPub.ok && !cPub.signature.ok && /not by the wallet/.test(cPub.signature.reason));
+const stMine = ST.buildStatement([pubRec], { wallet: stranger.address, days: 1 });
+const cMine = await ST.checkStatement(await ST.signStatement(stMine, stranger));
+check("statement check: signed by its wallet, but claiming someone else's payment, fails on the chain", cMine.signature.ok && !cMine.ok && cMine.payments[0].failed.includes("sent from your wallet"));
+
 const D = await import("../src/doctor.js");
 const dr = await D.doctor();
 const dget = (n) => dr.find((x) => x.name === n);
@@ -270,5 +284,5 @@ check("doctor: the brakes line shows the freeze the agent made", dr.find((x) => 
 (await import("../src/freeze.js")).unfreeze();
 check("doctor: shows the confirmed lookalike as something to look at", (await D.doctor()).find((x) => x.name === "payees").level === "warn");
 
-console.log(`\n${pass} passed, ${fail} failed. Nothing was signed or sent.`);
+console.log(`\n${pass} passed, ${fail} failed. No transaction was signed or sent.`);
 process.exit(fail ? 1 : 0);
