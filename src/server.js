@@ -8,6 +8,8 @@ import { walletStatus, rulesView, requestPayment, listReceipts, previewPayment }
 import { getReceipt, view } from "./receipts.js";
 import { verifyReceipt } from "./verify.js";
 import { freeze, frozen } from "./freeze.js";
+import { readLink } from "./paylink.js";
+import { loadConfig } from "./config.js";
 
 const VERSION = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
 const ok = (data) => ({ content: [{ type: "text", text: JSON.stringify(data, (k, v) => (typeof v === "bigint" ? v.toString() : v), 2) }] });
@@ -28,6 +30,8 @@ export const TOOLS = [
     { readOnlyHint: false, destructiveHint: false, openWorldHint: true }, (a) => requestPayment(a, { by: "agent" })],
   ["check_payment", "Check a payment first", "Dry run: what would happen if you asked for this payment now (blocked, needs the owner, ready or sent), with the rule and reason, simulated on mainnet when the rules would let it through. Nothing is recorded, nothing counts against the budget, nothing is signed. Use it to plan, then call request_payment once.",
     { payee: z.string().describe("Payee name exactly as get_rules lists it"), amount: z.string().describe("Amount as decimal text"), token: z.string().max(11).optional().describe("Token symbol, default USDG") }, READ, (a) => previewPayment(a)],
+  ["read_payment_link", "Read a payment link", "Read an ethereum: payment link (EIP-681) someone gave you: who it pays, how much, which token, and whether that payee is on the owner's list. It pays nothing. If it is on the list, call request_payment with the payee name it returns.",
+    { link: z.string().max(400).describe("The ethereum:0x… link") }, READ, (a) => readLink(a.link, loadConfig())],
   ["get_receipt", "Receipt", "One receipt by id (RP-00001): status, the rule that decided, the simulation, and the transaction once sent.", { id: z.string() }, READ,
     (a) => { const r = getReceipt(a.id); if (!r) throw new Error(`No receipt ${a.id}.`); return view(r); }],
   ["verify_receipt", "Verify a receipt on-chain", "Read a sent payment back from Robinhood Chain mainnet and check it against its receipt: confirmed and succeeded, sent from this wallet, to the payee, the exact amount and token. Use it before telling the user a payment arrived.", { id: z.string() }, READ,
@@ -40,7 +44,7 @@ export const TOOLS = [
 ];
 
 /** Tools that change nothing but the freeze. request_payment is the only tool left out in read-only mode. */
-export const READ_ONLY_TOOLS = ["wallet_status", "get_rules", "check_payment", "get_receipt", "verify_receipt", "list_receipts", "freeze_wallet"];
+export const READ_ONLY_TOOLS = ["wallet_status", "get_rules", "check_payment", "read_payment_link", "get_receipt", "verify_receipt", "list_receipts", "freeze_wallet"];
 
 export function buildServer({ readOnly = false } = {}) {
   const s = new McpServer({ name: "reinpay", version: VERSION }, {

@@ -197,7 +197,7 @@ const { StdioClientTransport } = await import("@modelcontextprotocol/sdk/client/
 const mcp = new Client({ name: "reinpay-live-test", version: "0.0.0" });
 await mcp.connect(new StdioClientTransport({ command: process.execPath, args: [fileURLToPath(new URL("../bin/reinpay.js", import.meta.url)), "mcp"], env: { ...process.env, REINPAY_HOME: home } }));
 const names = (await mcp.listTools()).tools.map((t) => t.name).sort();
-check(`the agent gets 8 tools (${names.join(", ")})`, names.join() === "check_payment,freeze_wallet,get_receipt,get_rules,list_receipts,request_payment,verify_receipt,wallet_status");
+check(`the agent gets 9 tools (${names.join(", ")})`, names.join() === "check_payment,freeze_wallet,get_receipt,get_rules,list_receipts,read_payment_link,request_payment,verify_receipt,wallet_status");
 check("no tool can approve, reject or change rules or payees", !names.some((n) => /approve|reject|rule_set|payee|unlock|autosend/.test(n)));
 const call = async (name, args = {}) => { const r = await mcp.callTool({ name, arguments: args }); return { err: !!r.isError, text: r.content.map((x) => x.text).join("") }; };
 const rules = JSON.parse((await call("get_rules")).text);
@@ -277,7 +277,7 @@ check("statement check: signed by its wallet, but claiming someone else's paymen
 const ro = new Client({ name: "reinpay-live-test-ro", version: "0.0.0" });
 await ro.connect(new StdioClientTransport({ command: process.execPath, args: [fileURLToPath(new URL("../bin/reinpay.js", import.meta.url)), "mcp", "--read-only"], env: { ...process.env, REINPAY_HOME: home } }));
 const roNames = (await ro.listTools()).tools.map((t) => t.name).sort();
-check(`read-only MCP: ${roNames.length} tools, no request_payment`, roNames.length === 7 && !roNames.includes("request_payment"), roNames.join(", "));
+check(`read-only MCP: ${roNames.length} tools, no request_payment`, roNames.length === 8 && !roNames.includes("request_payment"), roNames.join(", "));
 const roTry = await ro.callTool({ name: "request_payment", arguments: { payee: "Test payee", amount: "0.0001", token: "ETH", memo: "x" } }).catch((e) => ({ isError: true, content: [{ text: e.message }] }));
 check("read-only MCP: asking for a payment is refused", !!roTry.isError);
 await ro.close();
@@ -313,5 +313,20 @@ check("category budget: 3 USDG to a compute payee with a 2 USDG compute budget i
 const cs = await rq("USDG only", "1", "USDG", "category test");
 check("inside the compute budget, the rules let it through to the mainnet simulation (blocked there: the test wallet holds no USDG)", cs.rule === "simulation", `${cs.rule}: ${cs.reason}`);
 
+// ---- 0.12: a payment link and a scheduled payment on the real payment path ----
+{ const c0 = C.loadConfig(); delete c0.rules.categories; C.saveConfig(c0); }
+const LK = await import("../src/paylink.js");
+const lk = LK.readLink(LK.makeLink(DEAD, "ETH", 400000000000000n), C.loadConfig());
+check("payment link: an ETH link to the burn address resolves to the listed payee", lk.onList && lk.payee === "Test payee" && lk.amount === "0.0004");
+const lr = await P.requestPayment({ payee: lk.payee, amount: lk.amount, token: lk.token, memo: "payment link" }, { by: "owner" });
+check("payment link: the request goes through the rules and the mainnet simulation", ["ready", "needs_approval", "blocked"].includes(lr.status) && !!lr.rule, `${lr.status}: ${lr.rule}`);
+const mcpLink = await (async () => { const cl = new Client({ name: "reinpay-live-link", version: "0.0.0" }); await cl.connect(new StdioClientTransport({ command: process.execPath, args: [fileURLToPath(new URL("../bin/reinpay.js", import.meta.url)), "mcp"], env: { ...process.env, REINPAY_HOME: home } })); const r = await cl.callTool({ name: "read_payment_link", arguments: { link: LK.makeLink(OTHER, "USDG", 1000000n) } }); await cl.close(); return JSON.parse(r.content[0].text); })();
+check("read_payment_link over MCP: reads the link and names the payee, pays nothing", mcpLink.payee === "USDG only" && mcpLink.amount === "1" && mcpLink.token === "USDG");
+const SC = await import("../src/schedule.js");
+const sch = SC.newSchedule({ payee: "Test payee", amount: "0.0001", token: "ETH", every: "daily", start: new Date(Date.now() - 60000).toISOString() });
+const sst = {}; check("schedule: a schedule that started a minute ago is due", SC.due([sch], sst).length === 1);
+SC.advance(sch, sst);
+const sr = await P.requestPayment({ payee: sch.payee, amount: sch.amount, token: sch.token, memo: `${sch.id} daily` }, { by: "schedule" });
+check("schedule: its payment goes through the rules like any other, and is not due again today", !!sr.rule && SC.due([sch], sst).length === 0, `${sr.status}: ${sr.rule}`);
 console.log(`\n${pass} passed, ${fail} failed. No transaction was signed or sent.`);
 process.exit(fail ? 1 : 0);

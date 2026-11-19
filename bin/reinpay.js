@@ -49,13 +49,18 @@ const HELP = `reinpay ${pkg.version} - a wallet for AI agents that only spends i
   reinpay verify <RP-id> | --all [--json]  Read sent payments back from the chain and check them against their receipts
   reinpay statement [--days=30] [--out=file.json]   A spending statement signed with your wallet key
   reinpay statement check <file.json>      Check anyone's statement: the signature, then every payment on the chain
+  reinpay schedule add <payee> <amount> <token> <daily|weekly|monthly> [--start=2026-12-01T09:00] [--memo=...]
+  reinpay schedule list | remove <id> | pause <id> | resume <id>
+  reinpay schedule run                     Ask for every payment that is due (put this on cron); rules still apply
+  reinpay pay <ethereum:… link> [--memo=...]   Ask for a payment from a payment link (EIP-681); payee must be on your list
+  reinpay link <payee> <amount> [token]    Make a payment link for a payee on your list
   reinpay digest [--days=1] [--dry]        Send a short spending summary to your Telegram or webhook (for a daily schedule)
   reinpay backup [--out=file.json]         Everything needed to move this wallet: key (still encrypted), rules, payees, receipts
   reinpay restore <file.json>              Restore a backup into an empty wallet or profile. Terminal only.
   reinpay doctor [--json]                  Check this computer's setup: Node, RPC, chain, wallet, seal, unlock, gas money, payees, budgets
   reinpay token add <0xaddress> | list | remove <SYMBOL>
                                            Spend another ERC-20 (checked on-chain and on Sourcify first)
-  reinpay notify telegram <bot-token> <chat-id> | webhook <https-url> | secret | off | test
+  reinpay notify telegram <bot-token> <chat-id> | webhook <https-url> | secret | at <percent|off> | off | test
                                            Webhooks are signed: x-reinpay-signature (HMAC-SHA256); secret makes a new key
                                            Tell you when a payment waits for your approval
   reinpay report [--days=7] [--json | --csv]   What was sent, waiting and blocked, per day, with top payees
@@ -302,6 +307,14 @@ async function main() {
     requireTTY("notify");
     const { parseNotify, notifyOwner } = await import("../src/notify.js");
     const cfg = C.loadConfig();
+    if (pos[0] === "at") {
+      if (!cfg.notify) throw new Error("Set up notifications first: reinpay notify telegram <bot-token> <chat-id>");
+      const v = String(pos[1] || "").replace(/%$/, "");
+      if (v === "off") { const { alertAt, ...rest } = cfg.notify; cfg.notify = rest; C.saveConfig(cfg); return console.log("Budget alerts off."); }
+      const n = Number(v); if (!(Number.isInteger(n) && n >= 1 && n <= 100)) throw new Error("Usage: reinpay notify at <1-100|off>  e.g. reinpay notify at 80");
+      cfg.notify = { ...cfg.notify, alertAt: n }; C.saveConfig(cfg);
+      return console.log(`You will get one message a day per token when ${n}% of today's budget is used.`);
+    }
     if (pos[0] === "secret") {
       if (cfg.notify?.type !== "webhook") throw new Error("Only webhooks are signed. Set one up first: reinpay notify webhook <https-url>");
       cfg.notify = { ...cfg.notify, secret: (await import("../src/notify.js")).newSecret() };
@@ -392,6 +405,58 @@ async function main() {
     const r = await restoreBackup(b);
     return console.log(`Restored ${r.address} with ${r.receipts} receipts${r.frozen ? " (still frozen)" : ""}. Config seal: ${r.seal.ok ? "ok" : r.seal.reason}.\nYour passphrase is the same as before. Run reinpay doctor to check the setup.`);
   }
+  if (cmd === "schedule") {
+    const S = await import("../src/schedule.js");
+    const [sub, a1, a2, a3, a4] = pos;
+    const cfg = C.loadConfig();
+    if (sub === "list" || !sub) { const st = S.loadState(); return console.log(JSON.stringify((cfg.schedules || []).map((x) => ({ ...x, next: S.nextOf(x, st) })), null, 2)); }
+    if (sub === "run") {
+      const { checkSeal } = await import("../src/seal.js");
+      const st = S.loadState(), list = S.due(cfg.schedules, st);
+      if (!list.length) return console.log("Nothing is due.");
+      const sc = await checkSeal(cfg, K.walletAddress());
+      if (!sc.ok) throw new Error(`Not run: ${sc.reason}. Check reinpay rules, then reinpay seal.`);
+      const now = Date.now();
+      for (const x of list) {
+        const { next, skipped } = S.advance(x, st, now); S.saveState(st); // advance first: a crash never pays one slot twice
+        const r = await P.requestPayment({ payee: x.payee, amount: x.amount, token: x.token, memo: `${x.id} ${x.every}${x.memo ? ": " + x.memo : ""}` }, { by: "schedule" });
+        console.log(`${x.id} ${x.amount} ${x.token} to ${x.payee}: ${r.status} (${r.rule})${skipped ? `, ${skipped} missed slot${skipped === 1 ? "" : "s"} skipped` : ""}. ${r.id}. Next: ${next}`);
+      }
+      return;
+    }
+    requireTTY("schedule " + sub);
+    if (sub === "add") {
+      const { syncTokens } = await import("../src/chain.js"); const { findPayee } = await import("../src/rules.js");
+      const p = findPayee(cfg.payees, a1); if (!p) throw new Error(`"${a1}" is not on your payee list.`);
+      const tok = String(a3 || "").toUpperCase(); if (!Object.keys(syncTokens(cfg)).includes(tok)) throw new Error(`Unknown token "${a3}".`);
+      const x = S.newSchedule({ payee: p.name, amount: a2, token: tok, every: a4, start: opt("start"), memo: opt("memo") });
+      cfg.schedules = [...(cfg.schedules || []), x]; C.saveConfig(cfg);
+      return console.log(`Added ${x.id}: ${x.amount} ${tok} to ${p.name} ${x.every}, first at ${x.start}. Every one still goes through your rules.\nRun reinpay schedule run from cron, e.g. every 15 minutes.`);
+    }
+    const x = (cfg.schedules || []).find((s) => s.id === String(a1 || "").toUpperCase());
+    if (!x) throw new Error(`No schedule ${a1}. See reinpay schedule list.`);
+    if (sub === "remove") cfg.schedules = cfg.schedules.filter((s) => s !== x);
+    else if (sub === "pause") x.paused = true;
+    else if (sub === "resume") delete x.paused;
+    else throw new Error("Usage: reinpay schedule <add|list|remove|pause|resume|run>");
+    C.saveConfig(cfg);
+    return console.log(`${x.id} ${sub === "remove" ? "removed" : sub + "d"}.`);
+  }
+  if (cmd === "pay") {
+    const { readLink } = await import("../src/paylink.js");
+    const L = readLink(pos[0], C.loadConfig());
+    console.log(`Link: ${L.amount} ${L.token || "?"} to ${L.payee || L.to}${L.payee ? ` (${L.to})` : ""}`);
+    if (L.problem) throw new Error(`Not paid: ${L.problem}.`);
+    const r = await P.requestPayment({ payee: L.payee, amount: L.amount, token: L.token, memo: opt("memo") || "payment link" }, { by: "owner" });
+    return console.log(line(r));
+  }
+  if (cmd === "link") {
+    const { makeLink } = await import("../src/paylink.js"); const { findPayee, parseAmount } = await import("../src/rules.js"); const { syncTokens } = await import("../src/chain.js");
+    const cfg = C.loadConfig(); syncTokens(cfg);
+    const p = findPayee(cfg.payees, pos[0]); if (!p) throw new Error(`"${pos[0]}" is not on your payee list.`);
+    const tok = String(pos[2] || "USDG").toUpperCase();
+    return console.log(makeLink(p.address, tok, parseAmount(pos[1], tok)));
+  }
   if (cmd === "statement") {
     const S = await import("../src/statement.js");
     const { readFileSync: rf, writeFileSync: wf, existsSync: ex } = await import("node:fs");
@@ -448,7 +513,7 @@ async function main() {
 }
 
 // Commands that change rules, payees, tokens or notifications seal the config with the wallet key afterwards.
-const MUTATING = ["rule", "autosend"].includes(cmd) || (cmd === "grant" && pos[0] && pos[0] !== "list") || (cmd === "notify" && pos[0] !== "test") || (cmd === "payee" && ["add", "remove", "off", "on", "limit", "until", "import", "category"].includes(pos[0])) || (cmd === "token" && ["add", "remove"].includes(pos[0]));
+const MUTATING = ["rule", "autosend"].includes(cmd) || (cmd === "schedule" && ["add", "remove", "pause", "resume"].includes(pos[0])) || (cmd === "grant" && pos[0] && pos[0] !== "list") || (cmd === "notify" && pos[0] !== "test") || (cmd === "payee" && ["add", "remove", "off", "on", "limit", "until", "import", "category"].includes(pos[0])) || (cmd === "token" && ["add", "remove"].includes(pos[0]));
 async function reseal(passphrase) {
   const K = await import("../src/keystore.js"), C = await import("../src/config.js"), { sealConfig } = await import("../src/seal.js");
   const pass = passphrase ?? (K.isUnlocked() ? undefined : await ask("Passphrase to seal your rules (hidden): ", { hidden: true }));

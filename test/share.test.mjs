@@ -58,7 +58,7 @@ check("an old webhook without a secret still works, unsigned", !seen.headers["x-
 check("read-only mode leaves out request_payment only", SV.TOOLS.map((t) => t[0]).filter((n) => !SV.READ_ONLY_TOOLS.includes(n)).join() === "request_payment");
 const ro = SV.buildServer({ readOnly: true }), full = SV.buildServer();
 const names = (srv) => Object.keys(srv._registeredTools || {}).sort().join();
-check("the read-only server registers 7 tools, the full one 8", Object.keys(ro._registeredTools || {}).length === 7 && Object.keys(full._registeredTools || {}).length === 8, names(ro));
+check("the read-only server registers 8 tools, the full one 9", Object.keys(ro._registeredTools || {}).length === 8 && Object.keys(full._registeredTools || {}).length === 9, names(ro));
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

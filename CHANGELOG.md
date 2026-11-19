@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.12.0 (unreleased): bills
+
+- Scheduled payments: `reinpay schedule add <payee> <amount> <token> <daily|weekly|monthly> [--start=] [--memo=]`, `schedule list | pause | resume | remove`, and `schedule run` for cron. Every due payment goes through every rule and the mainnet simulation, and waits for the owner unless autosend is on and the wallet is unlocked. Missed slots are skipped. Schedules are part of the sealed config (a config without schedules seals exactly as before); run state lives in `schedules-state.json`, so runs never break the seal. `schedule run` refuses to run if the seal does not match.
+- Payment links: `reinpay pay <ethereum:… link>` reads EIP-681 links (ETH `value=`, ERC-20 `transfer?address=&uint256=`), refuses other chains, other functions and payees not on the list, then asks for the payment like any other. `reinpay link <payee> <amount> [token]` makes one. New read-only MCP tool `read_payment_link`.
+- Budget alerts: `reinpay notify at <percent|off>` sends one message a day per token once that share of today's budget is used (event `budget_alert`).
+- Fixed: when Robinhood Chain could not be read (a rate limit or a timeout), the check that refuses token contracts as payees treated the address as "not a token" and let it through. It now refuses and asks you to try again, both in `payee add` and at payment time. Found by the live tests under a rate limit.
+- Tests: 29 link, schedule and alert checks and 3 fail-closed checks offline, plus 5 new live mainnet checks. All passing. No transaction is signed or sent.
+
 ## 0.11.0 (unreleased): smarter rules
 
 - Category budgets: `reinpay payee category <payee> <name|off>` and `reinpay rule category <name> daily <token> <amount|off>`. Every payee in a category shares that daily budget, on top of the overall one (rule `category budget`). Receipts store the category, `reinpay report` adds a By category section, shared payee lists carry it, and `get_rules` shows it.

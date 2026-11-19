@@ -3,7 +3,7 @@
 import { encodeFunctionData, erc20Abi, getAddress, isAddress, formatEther, createWalletClient } from "viem";
 import { publicClient, robinhoodChain, transport, token as tokenOf, TOKENS, BUILTIN, syncTokens, txLink, addrLink, CHAIN_ID } from "./chain.js";
 import { loadConfig, saveConfig } from "./config.js";
-import { decide, findPayee, parseAmount, totals, limit, fmt, dailyLimit, activeGrants } from "./rules.js";
+import { decide, findPayee, parseAmount, totals, limit, fmt, dailyLimit, activeGrants, localDay } from "./rules.js";
 
 const maxZero = (v) => (v > 0n ? v : 0n);
 import { allReceipts, addReceipt, updateReceipt, getReceipt, view } from "./receipts.js";
@@ -61,7 +61,11 @@ export async function tokenAt(address) {
   const a = getAddress(address);
   if (tokenCache.has(a)) return tokenCache.get(a);
   const c = publicClient();
-  const code = await c.getCode({ address: a }).catch(() => null);
+  // Fail closed: if the chain cannot be read (rate limit, timeout), say so instead of treating the address as "not a token".
+  const unreachable = (e) => /HTTP request failed|Too Many|429|fetch failed|timed? ?out|ECONN|socket|network/i.test(String(e?.shortMessage || "") + " " + String(e?.message || "") + " " + String(e?.details || ""));
+  let code;
+  try { code = await c.getCode({ address: a }); }
+  catch (e) { throw new Error(`Could not read ${a} from Robinhood Chain (${e?.shortMessage || e?.message}). Nothing was changed; try again in a minute.`); }
   let out = null;
   if (code && code !== "0x") {
     const [dec, sup, sym] = await Promise.allSettled([
@@ -69,6 +73,7 @@ export async function tokenAt(address) {
       c.readContract({ address: a, abi: erc20Abi, functionName: "totalSupply" }),
       c.readContract({ address: a, abi: erc20Abi, functionName: "symbol" }),
     ]);
+    for (const r of [dec, sup]) if (r.status === "rejected" && unreachable(r.reason)) throw new Error(`Could not check whether ${a} is a token: Robinhood Chain did not answer (${r.reason?.shortMessage || r.reason?.message}). Nothing was changed; try again in a minute.`);
     if (dec.status === "fulfilled" && sup.status === "fulfilled") out = sym.status === "fulfilled" && /^[\x20-\x7e]{1,20}$/.test(sym.value) ? sym.value : "a token";
   }
   tokenCache.set(a, out);
@@ -123,6 +128,7 @@ export async function requestPayment({ payee, amount, token = "USDG", memo = "" 
     if (status === "sending") rec._tx = ch.tx; // kept in memory only, never written to disk
     return rec;
   });
+  if (cfg.notify?.alertAt && ["needs_approval", "ready", "sending"].includes(r.status)) await budgetAlert(cfg, symbol).catch(() => null);
   if (r.status === "blocked" && by === "agent") {
     const t = tripped(allReceipts(), cfg.rules);
     if (t && !frozen()) {
@@ -144,6 +150,26 @@ export async function requestPayment({ payee, amount, token = "USDG", memo = "" 
     return view(updateReceipt(r.id, {}, n.ok ? `Owner notified (${n.detail}).` : `Owner notification failed (${n.detail}).`));
   }
   return view(r);
+}
+
+/** Tell the owner once a day per token when today's budget passes their alert line (notify.alertAt, a percent). */
+export async function budgetAlert(cfg, symbol, { now = Date.now(), fetch: f } = {}) {
+  const pct = Number(cfg.notify?.alertAt || 0);
+  const daily = dailyLimit(cfg.rules, symbol, now);
+  if (!pct || !daily) return null;
+  const { spent, held } = totals(allReceipts(), symbol, now);
+  if ((spent + held) * 100n < daily * BigInt(pct)) return null;
+  const { existsSync, readFileSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const { HOME, writePrivate } = await import("./config.js");
+  const file = join(HOME(), "alerts.json"), day = localDay(now);
+  let seen = {}; try { if (existsSync(file)) seen = JSON.parse(readFileSync(file, "utf8")); } catch { seen = {}; }
+  if (seen[day]?.[symbol]) return null;
+  seen = { [day]: { ...(seen[day] || {}), [symbol]: true } };
+  writePrivate(file, JSON.stringify(seen) + "\n");
+  const used = Number(((spent + held) * 1000n) / daily) / 10;
+  const text = `Reinpay: ${used}% of today's ${symbol} budget is used (sent ${fmt(spent, symbol)}, waiting ${fmt(held, symbol)} of ${fmt(daily, symbol)}).\nNew payments in ${symbol} are blocked once it is full.`;
+  return notifyOwner({ id: "BUDGET", token: symbol, status: "alert" }, { cfg, text, event: "budget_alert", ...(f ? { fetch: f } : {}) });
 }
 
 /**
@@ -236,6 +262,7 @@ export function rulesView(now = Date.now()) {
   return {
     frozen: frozen(), circuitBreaker: breakerOf(cfg.rules) ? `freezes after ${breakerOf(cfg.rules).count} blocked requests in ${breakerOf(cfg.rules).minutes} minutes` : "off",
     firstPaymentNeedsOwner: cfg.rules.firstPayment === "ask",
+    ...(cfg.schedules?.length ? { scheduledPayments: cfg.schedules.map((x) => ({ id: x.id, payee: x.payee, amount: `${x.amount} ${x.token}`, every: x.every, starts: x.start, ...(x.paused ? { paused: true } : {}) })) } : {}),
     ...(cfg.rules.maxPerHour ? { maxPaymentsPerHour: Number(cfg.rules.maxPerHour) } : {}),
     ...(cfg.rules.hours ? { paymentHours: `${cfg.rules.hours.from}:00-${cfg.rules.hours.to}:00 local${cfg.rules.hours.weekdays ? ", weekdays only" : ""}; outside them payments wait for the owner` } : {}),
     ...(cfg.rules.categories ? { categoryBudgets: Object.fromEntries(Object.entries(cfg.rules.categories).map(([c, v]) => [c, Object.fromEntries(Object.entries(v.daily || {}).map(([t, a]) => [t, `${a} ${t} a day`]))])) } : {}),
@@ -280,8 +307,8 @@ export async function addPayee({ name, address, tokens, note, maxPerPayment, all
   if (cfg.payees.some((p) => getAddress(p.address) === a)) throw new Error(`${a} is already on the list.`);
   const like = findLookalike(a, [...cfg.payees, ...(walletAddress() ? [{ name: "your own wallet", address: walletAddress() }] : [])]);
   if (like && !allowLookalike) throw new LookalikeError(a, like);
-  const code = await publicClient().getCode({ address: a }).catch(() => null);
-  const tok = code && code !== "0x" ? await tokenAt(a) : null;
+  const tok = await tokenAt(a); // throws if the chain cannot be read
+  const code = await publicClient().getCode({ address: a });
   if (tok) throw new Error(`${a} is the contract of ${tok}, not a wallet. Tokens sent to a token contract are usually stuck for good. Use the recipient's own address.`);
   const p = { name, address: a, ...(tokens ? { tokens } : {}), ...(note ? { note } : {}), ...(maxPerPayment ? { maxPerPayment } : {}), isContract: !!code && code !== "0x", ...(like ? { lookalikeConfirmed: like.name } : {}), ...(untilMs ? { expiresAt: new Date(Date.now() + untilMs).toISOString() } : {}), addedAt: new Date().toISOString() };
   cfg.payees.push(p);

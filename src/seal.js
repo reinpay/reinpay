@@ -7,7 +7,7 @@ const canon = (v) => (Array.isArray(v) ? v.map(canon) : v && typeof v === "objec
 
 /** The text that is signed: a fixed label plus the hash of everything that decides a payment. */
 export function sealMessage(cfg) {
-  const body = { rules: cfg.rules || {}, payees: cfg.payees || [], tokens: cfg.tokens || [], notify: cfg.notify || null };
+  const body = { rules: cfg.rules || {}, payees: cfg.payees || [], tokens: cfg.tokens || [], notify: cfg.notify || null, ...(cfg.schedules?.length ? { schedules: cfg.schedules } : {}) };
   return "Reinpay config seal v1\n" + keccak256(toBytes(JSON.stringify(canon(body))));
 }
 

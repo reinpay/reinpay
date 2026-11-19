@@ -89,7 +89,16 @@ reinpay payee category "GPU credits" compute      # group payees
 reinpay rule category compute daily USDG 10       # a daily budget for the whole group
 reinpay rule hours 9-18 --weekdays                # outside these hours, everything waits for you
 reinpay rule per-hour 10                          # at most 10 payments in any hour
+reinpay schedule add "Weather API" 5 USDG weekly  # a payment that comes back every week
+reinpay pay "ethereum:0x…"                        # ask for a payment from a payment link
+reinpay notify at 80                              # a message when 80% of today's budget is used
 ```
+
+### Bills
+
+- **Scheduled payments.** `reinpay schedule add <payee> <amount> <token> <daily|weekly|monthly> [--start=2026-12-01T09:00] [--memo=...]`, then run `reinpay schedule run` from cron or Task Scheduler (for example every 15 minutes: `*/15 * * * * reinpay schedule run`). Each due payment is asked for exactly like the agent would: every rule, the mainnet simulation, a receipt. It is sent only if autosend is on and the wallet is unlocked; otherwise it waits for you. Missed slots are skipped, never paid as a backlog. What to pay is part of the sealed config; when it runs next is kept in `schedules-state.json`, so running schedules never breaks the seal. `schedule list | pause | resume | remove`.
+- **Payment links.** `reinpay pay <ethereum:… link>` reads a standard EIP-681 link (ETH, or an ERC-20 `transfer`) and asks for that payment, but only if the recipient is already on your payee list and the link is for Robinhood Chain (or names no chain). `reinpay link <payee> <amount> [token]` makes one. Agents get the read-only `read_payment_link` tool, which says who and how much without paying.
+- **Budget alerts.** `reinpay notify at 80` sends one Telegram or webhook message a day per token once that share of today's budget is sent or waiting (event `budget_alert`). `reinpay notify at off` stops it.
 
 ### Smarter rules
 
@@ -145,6 +154,7 @@ Address poisoning scams send you dust from an address that starts and ends like 
 | `get_receipt` | One receipt by id |
 | `list_receipts` | Recent receipts, optionally by status |
 | `verify_receipt` | Read a sent payment back from the chain and check it against its receipt |
+| `read_payment_link` | Read an ethereum: payment link: who, how much, and whether the payee is on the list. Pays nothing |
 | `check_payment` | Dry run: what would happen to a payment now, without recording anything |
 | `freeze_wallet` | Stop every payment until the owner unfreezes it (the agent can freeze, never unfreeze) |
 
@@ -239,7 +249,7 @@ The repeat guard is 10 minutes, and `autosend` is off. A token with no daily bud
 npm test
 ```
 
-`test/rules.test.mjs` checks every rule offline, `test/lock.test.mjs` the spend lock (including two processes), `test/report.test.mjs` the spending report, `test/notify.test.mjs` the owner notifications, `test/csv.test.mjs` the CSV export and `test/profile.test.mjs` the profiles, `test/seal.test.mjs` the config seal and unlock, `test/guard.test.mjs` the lookalike guard, `test/verify.test.mjs` the on-chain receipt check and `test/doctor.test.mjs` the checkup and `test/freeze.test.mjs` the freeze, the circuit breaker and expiring payees, `test/paper.test.mjs` statements, the first-payment rule and the digest, `test/plan.test.mjs` grants, dry runs and backup/restore, `test/share.test.mjs` shared payee lists, signed webhooks and read-only MCP, and `test/smart.test.mjs` category budgets, payment hours and the per-hour cap. `test/live.mjs` runs on mainnet:
+`test/rules.test.mjs` checks every rule offline, `test/lock.test.mjs` the spend lock (including two processes), `test/report.test.mjs` the spending report, `test/notify.test.mjs` the owner notifications, `test/csv.test.mjs` the CSV export and `test/profile.test.mjs` the profiles, `test/seal.test.mjs` the config seal and unlock, `test/guard.test.mjs` the lookalike guard, `test/verify.test.mjs` the on-chain receipt check and `test/doctor.test.mjs` the checkup and `test/freeze.test.mjs` the freeze, the circuit breaker and expiring payees, `test/paper.test.mjs` statements, the first-payment rule and the digest, `test/plan.test.mjs` grants, dry runs and backup/restore, `test/share.test.mjs` shared payee lists, signed webhooks and read-only MCP, `test/smart.test.mjs` category budgets, payment hours and the per-hour cap, and `test/bills.test.mjs` payment links, schedules and budget alerts. `test/live.mjs` runs on mainnet:
 
 - USDG transfer simulations from a public holder, and tampered ones that must be refused;
 - the full flow with a throwaway wallet that has a pretend ETH balance only inside the simulation;
@@ -253,7 +263,8 @@ npm test
 - statements built from a real public payment: one with the wrong signer and one claiming someone else's payment, both refused;
 - a dry run simulated on mainnet that records nothing, and `check_payment` over MCP;
 - the read-only MCP server over stdio, and a shared payee list whose token contract is still refused;
-- a category budget on the real payment path, before and after the mainnet simulation.
+- a category budget on the real payment path, before and after the mainnet simulation;
+- a payment link and a scheduled payment through the real payment path, and `read_payment_link` over MCP.
 
 No transaction is signed or sent.
 
