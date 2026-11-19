@@ -1,6 +1,6 @@
 // Payment requests: decide by the rules, simulate on mainnet, keep a receipt, and send only when allowed.
 // The agent (MCP) can request and read. Only the owner's terminal can approve, reject, or change rules and payees.
-import { encodeFunctionData, erc20Abi, getAddress, isAddress, formatEther, createWalletClient } from "viem";
+import { encodeFunctionData, erc20Abi, getAddress, isAddress, formatEther, parseEther, createWalletClient } from "viem";
 import { publicClient, robinhoodChain, transport, token as tokenOf, TOKENS, BUILTIN, syncTokens, txLink, addrLink, CHAIN_ID } from "./chain.js";
 import { loadConfig, saveConfig } from "./config.js";
 import { decide, findPayee, parseAmount, totals, limit, fmt, dailyLimit, activeGrants, localDay } from "./rules.js";
@@ -13,6 +13,8 @@ import { withLock } from "./lock.js";
 import { notifyOwner } from "./notify.js";
 import { checkSeal } from "./seal.js";
 import { usdValue } from "./price.js";
+import { search } from "./search.js";
+import { needsCosign, checkCosign } from "./cosign.js";
 import { findLookalike, LookalikeError } from "./lookalike.js";
 import { frozen, freeze, tripped, breakerOf } from "./freeze.js";
 
@@ -39,7 +41,15 @@ async function balances(address) {
 }
 
 /** Simulate the payment and check the wallet can pay it plus the network fee. Returns { problem, sim, feeWei }. */
-async function check(from, symbol, payeeAddress, amountRaw) {
+/** Pure: is this network fee above the owner's max fee? Returns a reason or null. */
+export function feeTooHigh(rules, feeWei) {
+  const m = rules?.maxFeeEth;
+  if (m == null || m === "") return null;
+  const cap = parseEther(String(m));
+  return feeWei > cap ? `the network fee would be about ${formatEther(feeWei)} ETH, above your max fee of ${m} ETH` : null;
+}
+
+async function check(from, symbol, payeeAddress, amountRaw, rules = null) {
   const c = publicClient();
   const tx = buildTx(symbol, payeeAddress, amountRaw);
   const [bal, gasPrice] = await Promise.all([balances(from), c.getGasPrice()]);
@@ -50,6 +60,8 @@ async function check(from, symbol, payeeAddress, amountRaw) {
   const feeWei = (sim.gasUsed * FEE_MARGIN * gasPrice) / 10n;
   const ethNeeded = feeWei + (symbol === "ETH" ? amountRaw : 0n);
   if (bal.ETH < ethNeeded) return { problem: `the wallet holds ${formatEther(bal.ETH)} ETH, not enough for the network fee of about ${formatEther(feeWei)} ETH${symbol === "ETH" ? " on top of the payment" : ""}`, tx, sim };
+  const tooHigh = feeTooHigh(rules, feeWei);
+  if (tooHigh) return { problem: tooHigh, rule: "network fee", tx, sim, feeWei };
   return { problem: null, tx, sim, feeWei };
 }
 
@@ -111,7 +123,7 @@ async function usdFor(cfg, symbol, amountRaw) {
   return u.value === null ? { usdReason: u.reason } : { usdRaw: u.value.toString(), ethPrice: symbol === "ETH" ? u.price : undefined };
 }
 
-export async function requestPayment({ payee, amount, token = "USDG", memo = "" }, { by = "agent" } = {}) {
+export async function requestPayment({ payee, amount, token = "USDG", memo = "" }, { by = "agent", session = null } = {}) {
   const from = requireWallet();
   const cfg = loadConfig();
   syncTokens(cfg);
@@ -120,7 +132,7 @@ export async function requestPayment({ payee, amount, token = "USDG", memo = "" 
   const p = findPayee(cfg.payees, payee);
   const tokenPayee = p && p.isContract !== false ? await tokenAt(p.address) : null;
   const base = { by, wallet: from, chainId: CHAIN_ID, payee: p ? p.name : String(payee ?? ""), payeeAddress: p ? p.address : null,
-    ...(p?.category ? { category: p.category } : {}), token: symbol, tokenAddress: TOKENS[symbol].address, amount: fmt(amountRaw, symbol).split(" ")[0], amountRaw: amountRaw.toString(), memo: String(memo).slice(0, 200) };
+    ...(session ? { session: session.id } : {}), ...(p?.category ? { category: p.category } : {}), token: symbol, tokenAddress: TOKENS[symbol].address, amount: fmt(amountRaw, symbol).split(" ")[0], amountRaw: amountRaw.toString(), memo: String(memo).slice(0, 200) };
   // Decide, simulate and write the receipt as one step, so a second request cannot spend the same budget in between.
   // Once the receipt exists it counts against today's budget (waiting or sending), so signing can happen outside the lock.
   const fz = frozen();
@@ -129,10 +141,10 @@ export async function requestPayment({ payee, amount, token = "USDG", memo = "" 
   if (usd.usdRaw) { base.usdRaw = usd.usdRaw; base.usdValue = fmt(BigInt(usd.usdRaw), "USDG").split(" ")[0]; if (usd.ethPrice) base.ethPriceUsdg = usd.ethPrice.toFixed(2); }
   const r = tokenPayee ? addReceipt({ ...base, status: "blocked", rule: "token contract", reason: `${p.name} (${p.address}) is the contract of ${tokenPayee}. Tokens sent to a token contract are usually stuck for good. Ask the owner to fix this payee.` }) : await withLock(async () => {
     expireStale(cfg.rules);
-    const d = decide({ rules: cfg.rules, receipts: allReceipts(), request: { payee: p, token: symbol, amountRaw, memo, usdRaw: usd.usdRaw, usdReason: usd.usdReason } });
+    const d = decide({ rules: cfg.rules, receipts: allReceipts(), request: { payee: p, token: symbol, amountRaw, memo, usdRaw: usd.usdRaw, usdReason: usd.usdReason, session } });
     if (d.status === "blocked") return addReceipt({ ...base, status: "blocked", rule: d.rule, reason: d.reason });
-    const ch = await check(from, symbol, p.address, amountRaw);
-    if (ch.problem) return addReceipt({ ...base, status: "blocked", rule: "simulation", reason: `Simulated on mainnet: ${ch.problem}.`, simulation: simView(ch.sim) });
+    const ch = await check(from, symbol, p.address, amountRaw, cfg.rules);
+    if (ch.problem) return addReceipt({ ...base, status: "blocked", rule: ch.rule || "simulation", reason: `Simulated on mainnet: ${ch.problem}.`, simulation: simView(ch.sim) });
     const status = d.status === "needs_approval" ? "needs_approval" : cfg.rules.autoSend && isUnlocked() ? "sending" : "ready";
     const reason = status === "ready" ? `${d.reason} Waiting for the owner because autoSend is ${cfg.rules.autoSend ? "on but the wallet is locked" : "off"}.` : d.reason;
     const rec = addReceipt({ ...base, status, rule: d.rule, reason, simulation: simView(ch.sim, ch.feeWei) });
@@ -202,8 +214,8 @@ export async function previewPayment({ payee, amount, token = "USDG", memo }) {
   const usd = await usdFor(cfg, symbol, amountRaw);
   const d = decide({ rules: memo === undefined ? { ...cfg.rules, memoMin: 0 } : cfg.rules, receipts: allReceipts(), request: { payee: p, token: symbol, amountRaw, memo, usdRaw: usd.usdRaw, usdReason: usd.usdReason } });
   if (d.status === "blocked") return out("blocked", d.rule, d.reason);
-  const ch = await check(from, symbol, p.address, amountRaw);
-  if (ch.problem) return out("blocked", "simulation", `Simulated on mainnet: ${ch.problem}.`, { simulation: simView(ch.sim) });
+  const ch = await check(from, symbol, p.address, amountRaw, cfg.rules);
+  if (ch.problem) return out("blocked", ch.rule || "simulation", `Simulated on mainnet: ${ch.problem}.`, { simulation: simView(ch.sim) });
   const wouldBe = d.status === "needs_approval" ? "needs_approval" : cfg.rules.autoSend && isUnlocked() ? "sent" : "ready";
   return out(wouldBe, d.rule, wouldBe === "ready" ? `${d.reason} It would wait for the owner because autoSend is ${cfg.rules.autoSend ? "on but the wallet is locked" : "off"}.` : d.reason, { simulation: simView(ch.sim, ch.feeWei) });
 }
@@ -218,11 +230,20 @@ export function expireStale(rules, now = Date.now()) {
 }
 
 /** Owner only (terminal): approve a waiting payment. Rules and the simulation are checked again first. */
-export async function approve(id, { passphrase } = {}) {
+export async function approve(id, { passphrase, cosig } = {}) {
   expireStale(loadConfig().rules);
   const pre = getReceipt(id);
   if (!pre) throw new Error(`No receipt ${id}.`);
   if (!["needs_approval", "ready"].includes(pre.status)) throw new Error(`${pre.id} is ${pre.status}; only waiting payments can be approved.`);
+  // Two-person approval is checked first, before the chain is read or the key is opened.
+  let cosignOk = false;
+  { const cfg0 = loadConfig();
+    if (needsCosign(cfg0.rules, pre.token, pre.amountRaw)) {
+      const cs = await checkCosign(cfg0.rules, pre, cosig);
+      if (!cs.ok) throw new Error(`Not signed: ${cs.reason}.`);
+      cosignOk = true;
+      updateReceipt(pre.id, { cosignedBy: getAddress(cfg0.rules.cosign.by) }, `Co-signed (${cs.reason}).`);
+    } }
   // The account is opened before the lock, so a wrong passphrase fails before anything changes.
   const fz = frozen();
   if (fz) throw new Error(`Reinpay is frozen (${fz.reason}). Check reinpay receipts, then run reinpay unfreeze before approving.`);
@@ -238,8 +259,9 @@ export async function approve(id, { passphrase } = {}) {
     const d = decide({ rules: { ...cfg.rules, repeatGuardMinutes: 0, approveAbove: {}, memoMin: 0 }, receipts: allReceipts(), request: { payee: p, token: r.token, amountRaw: BigInt(r.amountRaw), usdRaw: usd.usdRaw, usdReason: usd.usdReason }, excludeId: r.id });
     if (d.status === "blocked") return { final: updateReceipt(r.id, { status: "blocked", rule: d.rule, reason: d.reason }, `Approval refused: ${d.reason}`) };
     // Build the transaction fresh from the payee list and the amount, simulate exactly that, and sign exactly that.
-    const ch = await check(r.wallet, r.token, getAddress(p.address), BigInt(r.amountRaw));
-    if (ch.problem) return { final: updateReceipt(r.id, { status: "blocked", rule: "simulation", reason: `Simulated again: ${ch.problem}.` }, "Approval refused by the second simulation.") };
+    const ch = await check(r.wallet, r.token, getAddress(p.address), BigInt(r.amountRaw), cfg.rules);
+    if (ch.problem) return { final: updateReceipt(r.id, { status: "blocked", rule: ch.rule || "simulation", reason: `Simulated again: ${ch.problem}.` }, "Approval refused by the second simulation.") };
+    if (needsCosign(cfg.rules, r.token, r.amountRaw) && !cosignOk) throw new Error("Not signed: the co-signature was not checked."); // checked before the lock
     const sc = await checkSeal(cfg, r.wallet);
     if (!sc.ok) return { final: updateReceipt(r.id, { rule: "config seal", reason: `Not signed: ${sc.reason}. Check reinpay rules, then run reinpay seal and approve again.` }, "Approval stopped: config not sealed.") };
     return { go: updateReceipt(r.id, { status: "sending", simulation: simView(ch.sim, ch.feeWei) }, "Approved by the owner; simulated again."), tx: ch.tx };
@@ -255,10 +277,10 @@ export function reject(id, why = "Rejected by the owner.") {
   return view(updateReceipt(r.id, { status: "rejected" }, why));
 }
 
-export function listReceipts({ status, limit: n = 20 } = {}) {
+export function listReceipts({ status, limit: n = 20, ...filters } = {}) {
   try { expireStale(loadConfig().rules); } catch { /* reading receipts never fails because of this */ }
-  let list = allReceipts().slice().reverse();
-  if (status) list = list.filter((r) => r.status === status);
+  syncTokens();
+  const list = search(allReceipts(), { status, ...filters }).slice().reverse();
   return list.slice(0, Math.min(Math.max(Number(n) || 20, 1), 200)).map(view);
 }
 
@@ -286,6 +308,8 @@ export function rulesView(now = Date.now()) {
   return {
     frozen: frozen(), circuitBreaker: breakerOf(cfg.rules) ? `freezes after ${breakerOf(cfg.rules).count} blocked requests in ${breakerOf(cfg.rules).minutes} minutes` : "off",
     firstPaymentNeedsOwner: cfg.rules.firstPayment === "ask",
+    ...(cfg.rules.maxFeeEth ? { maxNetworkFee: `${cfg.rules.maxFeeEth} ETH` } : {}),
+    ...(cfg.rules.cosign?.by ? { coSign: { by: cfg.rules.cosign.by, above: cfg.rules.cosign.above } } : {}),
     ...(cfg.rules.requireProven ? { unprovenPayeesNeedOwner: true } : {}),
     ...(usdRules(cfg.rules) ? { usdRules: { ...(cfg.rules.usd.max != null ? { maxPerPayment: `${cfg.rules.usd.max} USD` } : {}), ...(cfg.rules.usd.daily != null ? { dailyAcrossTokens: `${cfg.rules.usd.daily} USD` } : {}), priceSource: "two WETH/USDG pools on Robinhood Chain; payments in other tokens are blocked while USD rules are on" } } : {}),
     ...(cfg.rules.memoMin ? { memoRequired: `at least ${cfg.rules.memoMin} characters saying what the payment is for` } : {}),

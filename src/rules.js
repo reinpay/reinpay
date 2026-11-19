@@ -2,6 +2,7 @@
 // Amounts are bigint base units (USDG has 6 decimals, ETH 18), never floats.
 import { parseUnits, formatUnits, getAddress, isAddress } from "viem";
 import { TOKENS } from "./chain.js";
+import { needsCosign } from "./cosign.js";
 
 export const OPEN = ["needs_approval", "ready", "sending"]; // count against today's budget while open
 export const DONE_SPENT = ["sent"];
@@ -159,6 +160,15 @@ export function decide({ rules, receipts, request, now = Date.now(), excludeId =
     }
   }
 
+  if (request.session?.caps?.[symbol] != null) {
+    const cap = parseUnits(String(request.session.caps[symbol]), TOKENS[symbol].decimals);
+    let used = 0n;
+    for (const r of list) if (r.session === request.session.id && r.token === symbol && (DONE_SPENT.includes(r.status) || OPEN.includes(r.status))) used += BigInt(r.amountRaw);
+    if (used + amountRaw > cap) return { status: "blocked", rule: "session budget", reason: `This agent session may spend ${fmt(cap, symbol)} in all; ${fmt(used, symbol)} is already sent or waiting.` };
+  } else if (request.session && !(symbol in (request.session.caps || {}))) {
+    return { status: "blocked", rule: "session budget", reason: `This agent session has no budget for ${symbol}.` };
+  }
+
   const guard = Number(rules.repeatGuardMinutes || 0);
   if (guard > 0) {
     const since = now - guard * 60_000;
@@ -175,6 +185,7 @@ export function decide({ rules, receipts, request, now = Date.now(), excludeId =
   if (rules.requireProven && !payee.proof && payee.isContract !== true) {
     return { status: "needs_approval", rule: "unproven payee", reason: `${payee.name} has not proved it controls ${payee.address}. You asked to approve payments to unproven payees yourself (reinpay payee challenge "${payee.name}").` };
   }
+  if (needsCosign(rules, symbol, amountRaw)) return { status: "needs_approval", rule: "co-sign", reason: `${fmt(amountRaw, symbol)} is above your co-sign line of ${rules.cosign.above[symbol]} ${symbol}: it needs your approval and a signature from ${rules.cosign.by}.` };
   const line = limit(rules, "approveAbove", symbol);
   if (line !== null && amountRaw > line) return { status: "needs_approval", rule: "approval line", reason: `${fmt(amountRaw, symbol)} is above your approval line of ${fmt(line, symbol)}.` };
   return { status: "allowed", rule: "within rules", reason: "Inside every rule." };

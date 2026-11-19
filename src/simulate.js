@@ -10,6 +10,7 @@ const topicAddr = (t) => getAddress("0x" + t.slice(26));
 // Tests only: extra state overrides (a pretend balance for a throwaway wallet), applied inside the simulation and nowhere else.
 let testOverrides = null;
 export const _setTestOverrides = (fn) => { testOverrides = fn; };
+export const _getTestOverrides = () => testOverrides;
 
 /** Simulate one call from `from`. Returns { ok, error, gasUsed, block, outflows: [{token, to, amount}] }. */
 export async function simulate(from, tx, { stateOverrides } = {}) {

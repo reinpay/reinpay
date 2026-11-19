@@ -15,13 +15,13 @@ export async function runSandbox({ log = console.log, keep = false } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "reinpay-sandbox-"));
   process.env.REINPAY_HOME = dir; delete process.env.REINPAY_PROFILE;
   const K = await import("./keystore.js"), C = await import("./config.js"), P = await import("./pay.js"), S = await import("./simulate.js"), CH = await import("./chain.js"), { sealConfig } = await import("./seal.js");
-  const c = CH.publicClient(), realBalance = c.getBalance.bind(c);
+  const c = CH.publicClient(), realBalance = c.getBalance, prevOverrides = S._getTestOverrides();
   try {
     const pk = generatePrivateKey(), acct = privateKeyToAccount(pk);
     K.writeKeystore(pk, "sandbox-" + Math.random().toString(36).slice(2, 12));
     const me = getAddress(acct.address);
-    c.getBalance = async (a) => (getAddress(a.address) === me ? parseEther("1") : realBalance(a));
-    S._setTestOverrides((from) => (getAddress(from) === me ? { [me]: { balance: "0xde0b6b3a7640000" } } : undefined));
+    c.getBalance = async (a) => (getAddress(a.address) === me ? parseEther("1") : realBalance.call(c, a));
+    S._setTestOverrides((from) => (getAddress(from) === me ? { [me]: { balance: "0xde0b6b3a7640000" } } : prevOverrides ? prevOverrides(from) : undefined));
     const cfg = { ...C.DEFAULT_CONFIG, rules: { ...C.DEFAULT_CONFIG.rules }, payees: [{ name: "Weather API", address: getAddress(BURN), isContract: false, addedAt: new Date().toISOString() }, { name: "GPU credits", address: getAddress(OTHER), isContract: false, addedAt: new Date().toISOString() }] };
     C.saveConfig(await sealConfig(cfg, acct));
     log(`Sandbox wallet ${me} (throwaway, pretend 1 ETH that exists only inside the simulation).`);
@@ -46,7 +46,7 @@ export async function runSandbox({ log = console.log, keep = false } = {}) {
     log("Next: reinpay init, then reinpay payee add and reinpay rule. See reinpay --help.");
     return out;
   } finally {
-    c.getBalance = realBalance; S._setTestOverrides(null);
+    c.getBalance = realBalance; S._setTestOverrides(prevOverrides); // put back exactly what was there
     if (saved.home === undefined) delete process.env.REINPAY_HOME; else process.env.REINPAY_HOME = saved.home;
     if (saved.profile !== undefined) process.env.REINPAY_PROFILE = saved.profile;
     if (!keep) rmSync(dir, { recursive: true, force: true });

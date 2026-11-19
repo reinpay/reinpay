@@ -13,7 +13,10 @@ const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url),
 const HELP = `reinpay ${pkg.version} - a wallet for AI agents that only spends inside your rules (Robinhood Chain mainnet, chain id 4663)
 
   reinpay sandbox                          Try Reinpay with no money: real rules, real mainnet simulation, pretend balance
-  reinpay mcp [--read-only]                Run the MCP server on stdio (your agent host starts this); --read-only leaves out request_payment
+  reinpay connect <claude|cursor|vscode|windsurf|codex> [--read-only] [--session=USDG:5]   The snippet to add Reinpay to your agent host
+  reinpay mcp --check                      Start the MCP server the way a host does, and list its tools
+  reinpay mcp [--read-only] [--session=USDG:5,ETH:0.002]   Run the MCP server on stdio; --read-only leaves out request_payment;
+                                           --session caps what this one run may spend in all
   reinpay profiles [--status]              List wallets on this computer (one per agent); --status: today's spend, waiting, frozen
   --profile=<name>                         Use that agent's wallet for any command, e.g. reinpay init --profile=research
   reinpay init [--import]                  Create (or import) the encrypted wallet. Terminal only.
@@ -38,6 +41,9 @@ const HELP = `reinpay ${pkg.version} - a wallet for AI agents that only spends i
   reinpay payee challenge <payee>          The message the payee signs to prove they control their address
   reinpay payee prove <payee> <0xsignature>    Record the payee's proof
   reinpay rule require-proven <on|off>     Payments to payees without a proof wait for you
+  reinpay rule cosign <0xaddress> <token> <amount> | off   Above this, a second person must co-sign too
+  reinpay rule max-fee <eth|off>           Block a payment while the network fee is above this (e.g. 0.0001)
+  reinpay cosign-message <RP-id>           The text the co-signer signs; then reinpay approve <RP-id> --cosig=0x…
   reinpay grant <token> <amount> --for=2h [--note=...]   Extra budget for a while, on top of the daily budget
   reinpay grant list | clear               Show or remove grants
   reinpay check <payee> <amount> [token]   Dry run: what would happen to this payment now (nothing recorded or signed)
@@ -53,9 +59,10 @@ const HELP = `reinpay ${pkg.version} - a wallet for AI agents that only spends i
   reinpay pending                          Payments waiting for you
   reinpay approve <RP-id> [RP-id ...] | --all   Check the rules again, simulate again, then sign and send (one yes for all)
   reinpay reject <RP-id>                   Refuse a waiting payment
-  reinpay receipts [--status=sent] [--json | --csv]
+  reinpay receipts [--status=sent] [--payee=] [--token=] [--since=2026-11-01] [--until=] [--min=] [--max=] [--memo=] [--rule=] [--json | --csv]
   reinpay verify <RP-id> | --all [--json]  Read sent payments back from the chain and check them against their receipts
-  reinpay statement [--days=30] [--out=file.json]   A spending statement signed with your wallet key
+  reinpay statement [--days=30] [--out=file.json] [--no-memos]   A spending statement signed with your wallet key
+  reinpay redact <RP-id> [--reason=...]    Remove a receipt's memo for good (terminal only)
   reinpay statement check <file.json>      Check anyone's statement: the signature, then every payment on the chain
   reinpay share <RP-id> [--out=file.json]  A signed proof of one sent payment, for the payee or anyone
   reinpay share check <file.json>          Check a shared receipt: the signature, then the payment on the chain
@@ -71,12 +78,14 @@ const HELP = `reinpay ${pkg.version} - a wallet for AI agents that only spends i
   reinpay doctor [--json]                  Check this computer's setup: Node, RPC, chain, wallet, seal, unlock, gas money, payees, budgets
   reinpay token add <0xaddress> | list | remove <SYMBOL>
                                            Spend another ERC-20 (checked on-chain and on Sourcify first)
-  reinpay notify telegram <bot-token> <chat-id> | webhook <https-url> | secret | at <percent|off> | off | test
+  reinpay notify telegram <bot-token> <chat-id> | webhook <https-url> | secret | at <percent|off> | memos <on|off> | log | off | test
                                            Webhooks are signed: x-reinpay-signature (HMAC-SHA256); secret makes a new key
                                            Tell you when a payment waits for your approval
-  reinpay report [--days=7] [--json | --csv]   What was sent, waiting and blocked, per day, with top payees
+  reinpay books --month=2026-11 [--csv | --json]    One month of sent payments for your books, with USD values and fees
+  reinpay report [--days=7] [--json | --csv | --html [--out=report.html]]   What was sent, waiting and blocked, per day, with top payees
   reinpay export                           Show the private key. Terminal only.
-  reinpay --version`;
+  reinpay --version [--check]              The installed version; --check asks GitHub whether a newer one is out
+  reinpay changelog [--since=0.20.0]       What changed, from the installed CHANGELOG`;
 
 function requireTTY(what) {
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
@@ -109,9 +118,39 @@ async function main() {
   // --profile=<name> picks one agent's wallet (each profile has its own key, rules, payees and receipts).
   if (opt("profile")) process.env.REINPAY_PROFILE = opt("profile");
   if (!cmd || cmd === "help" || cmd === "--help" || cmd === "-h") return console.log(HELP);
-  if (cmd === "--version" || cmd === "-v" || cmd === "version") return console.log(pkg.version);
+  if ((cmd === "--version" || cmd === "-v" || cmd === "version") && !flags.has("--check")) return console.log(pkg.version);
+  if ((cmd === "--version" || cmd === "version") && flags.has("--check")) {
+    const U = await import("../src/update.js");
+    const r = await U.checkLatest(pkg.version);
+    if (!r.latest) { console.log(`reinpay ${pkg.version}. Could not check for a newer version: ${r.detail}.`); return; }
+    if (!r.newer) return console.log(`reinpay ${pkg.version} is the latest.`);
+    const news = U.changelogSince(U.readChangelog(), pkg.version);
+    return console.log(`reinpay ${pkg.version} is installed; ${r.latest} is out.\nUpdate with:\n  ${U.UPDATE_CMD}\nThen run reinpay changelog --since=${pkg.version} to see what changed.${news.length ? "" : ""}`);
+  }
+  if (cmd === "changelog") {
+    const U = await import("../src/update.js");
+    const list = U.changelogSince(U.readChangelog(), opt("since") || null);
+    return console.log(list.length ? list.map((x) => x.text).join("\n\n") : `Nothing newer than ${opt("since")}.`);
+  }
+  if (cmd === "connect") {
+    const { snippet, HOSTS } = await import("../src/connect.js");
+    const hosts = pos[0] ? [pos[0]] : HOSTS;
+    const o = { profile: process.env.REINPAY_PROFILE || null, readOnly: flags.has("--read-only"), session: opt("session") || null };
+    if (o.session) (await import("../src/session.js")).parseSession(o.session);
+    for (const h of hosts) { const x = snippet(h, o); console.log(`${h}\n${x.where}\n${x.text}\n`); }
+    return console.log("Then restart the host and ask it to call get_rules. Check the server any time with: reinpay mcp --check");
+  }
+  if (cmd === "mcp" && flags.has("--check")) {
+    const { checkServer } = await import("../src/connect.js");
+    const { fileURLToPath } = await import("node:url");
+    const extra = rest.filter((a) => a !== "--check" && a !== "mcp");
+    const r = await checkServer(fileURLToPath(import.meta.url), extra);
+    console.log(r.ok ? `The MCP server starts and offers ${r.detail}: ${r.tools.join(", ")}.` : `The MCP server did not start: ${r.detail}`);
+    if (!r.ok) process.exitCode = 1;
+    return;
+  }
   if (cmd === "sandbox") { await (await import("../src/sandbox.js")).runSandbox(); return; }
-  if (cmd === "mcp") { const { runServer } = await import("../src/server.js"); return runServer({ readOnly: flags.has("--read-only") }); }
+  if (cmd === "mcp") { const { runServer } = await import("../src/server.js"); return runServer({ readOnly: flags.has("--read-only"), session: opt("session") ? (await import("../src/session.js")).parseSession(opt("session")) : null }); }
 
   if (cmd === "profiles" && flags.has("--status")) {
     const FL = await import("../src/fleet.js");
@@ -205,7 +244,20 @@ async function main() {
     requireTTY("rule");
     const cfg = C.loadConfig();
     const [name, a1, a2] = pos;
-    if (name === "require-proven") {
+    if (name === "max-fee") {
+      if (a1 === "off") delete cfg.rules.maxFeeEth;
+      else { if (!/^\d+(\.\d+)?$/.test(String(a1 || ""))) throw new Error("Usage: reinpay rule max-fee <eth|off>, e.g. 0.0001"); cfg.rules.maxFeeEth = a1; }
+    } else if (name === "cosign") {
+      const { isAddress, getAddress } = await import("viem");
+      if (a1 === "off") delete cfg.rules.cosign;
+      else {
+        const [, , addr, tok, amt] = pos; const T = String(tok || "").toUpperCase();
+        const { syncTokens } = await import("../src/chain.js");
+        if (!isAddress(String(addr || "")) || !Object.keys(syncTokens(cfg)).includes(T) || !/^\d+(\.\d+)?$/.test(String(amt || ""))) throw new Error("Usage: reinpay rule cosign <0xaddress> <token> <amount> | off");
+        if (getAddress(addr) === K.walletAddress()) throw new Error("The co-signer must be someone else, not this wallet.");
+        cfg.rules.cosign = { by: getAddress(addr), above: { ...(cfg.rules.cosign?.above || {}), [T]: amt } };
+      }
+    } else if (name === "require-proven") {
       if (!["on", "off"].includes(a1)) throw new Error("Usage: reinpay rule require-proven <on|off>");
       if (a1 === "on") cfg.rules.requireProven = true; else delete cfg.rules.requireProven;
     } else if (name === "usd") {
@@ -364,7 +416,7 @@ async function main() {
     for (const id of ids) { const r = getReceipt(id); if (!r) throw new Error(`No receipt ${id}.`); console.log(line(view(r))); }
     if ((await ask(`Approve and send ${ids.length === 1 ? "this payment" : `these ${ids.length} payments`}? Each is checked and simulated again first. Type yes: `)).trim().toLowerCase() !== "yes") return console.log("Not approved. Nothing was sent.");
     const pass = K.isUnlocked() ? undefined : await ask("Passphrase (hidden): ", { hidden: true });
-    for (const id of ids) { try { console.log(line(await P.approve(id, { passphrase: pass }))); } catch (e) { console.log(`${id}: ${e.message}`); } }
+    for (const id of ids) { try { console.log(line(await P.approve(id, { passphrase: pass, cosig: ids.length === 1 ? opt("cosig") : undefined }))); } catch (e) { console.log(`${id}: ${e.message}`); } }
     return;
   }
   if (cmd === "reject") { requireTTY("reject"); return console.log(line(P.reject(pos[0]))); }
@@ -372,6 +424,18 @@ async function main() {
     requireTTY("notify");
     const { parseNotify, notifyOwner } = await import("../src/notify.js");
     const cfg = C.loadConfig();
+    if (pos[0] === "memos") {
+      if (!cfg.notify) throw new Error("Set up notifications first.");
+      if (!["on", "off"].includes(pos[1])) throw new Error("Usage: reinpay notify memos <on|off>");
+      cfg.notify = { ...cfg.notify }; if (pos[1] === "off") cfg.notify.hideMemos = true; else delete cfg.notify.hideMemos;
+      C.saveConfig(cfg);
+      return console.log(pos[1] === "off" ? "Notifications no longer include memos." : "Notifications include memos again.");
+    }
+    if (pos[0] === "log") {
+      const L = (await import("../src/notify.js")).readLog().slice(-Number(opt("last") || 20));
+      if (flags.has("--json")) return console.log(JSON.stringify(L, null, 2));
+      return console.log(L.length ? L.map((x) => `${x.at}  ${x.ok ? "sent  " : "FAILED"}  ${x.event.padEnd(16)} ${x.receipt || ""}  ${x.type} ${x.host}  ${x.detail}${x.attempts > 1 ? ` (${x.attempts} tries)` : ""}`).join("\n") : "No notifications sent yet.");
+    }
     if (pos[0] === "at") {
       if (!cfg.notify) throw new Error("Set up notifications first: reinpay notify telegram <bot-token> <chat-id>");
       const v = String(pos[1] || "").replace(/%$/, "");
@@ -402,6 +466,12 @@ async function main() {
     (await import("../src/chain.js")).syncTokens();
     const rep = spendingReport(allReceipts(), { days: opt("days") || 7 });
     if (flags.has("--csv")) return process.stdout.write((await import("../src/csv.js")).reportCSV(rep));
+    if (flags.has("--html")) {
+      const html = (await import("../src/htmlreport.js")).reportHTML(rep, { wallet: (await import("../src/keystore.js")).walletAddress() || "" });
+      if (!opt("out")) return process.stdout.write(html);
+      const { writeFileSync: wf } = await import("node:fs"); wf(opt("out"), html);
+      return console.log(`Wrote ${opt("out")}. Open it in any browser; it loads nothing from the internet.`);
+    }
     return console.log(flags.has("--json") ? JSON.stringify(rep, null, 2) : reportText(rep));
   }
   if (cmd === "token") {
@@ -533,7 +603,7 @@ async function main() {
     if (pos[0] !== "check") {
       const { getReceipt } = await import("../src/receipts.js");
       const { writeFileSync: wf, existsSync: ex } = await import("node:fs");
-      const st = S.receiptProof(getReceipt(pos[0] || ""), { wallet: P.requireWallet() });
+      const st = S.receiptProof(getReceipt(pos[0] || ""), { wallet: P.requireWallet(), memos: !flags.has("--no-memos") });
       if (!K.isUnlocked()) requireTTY("share");
       const signed = await S.signStatement(st, K.loadAccount(K.isUnlocked() ? undefined : await ask("Passphrase to sign the receipt (hidden): ", { hidden: true })));
       const out = opt("out") || `reinpay-receipt-${st.payments[0].id}.json`;
@@ -541,6 +611,19 @@ async function main() {
       wf(out, JSON.stringify(signed, null, 2) + "\n");
       return console.log(`Wrote ${out}: ${st.payments[0].amount} ${st.payments[0].token} to ${st.payments[0].payee}, tx ${st.payments[0].txHash}, signed by ${signed.signature.by}.\nWhoever gets it can check it with: reinpay share check ${out}`);
     }
+  }
+  if (cmd === "redact") {
+    requireTTY("redact");
+    const { redactMemo, getReceipt, view } = await import("../src/receipts.js");
+    const r = getReceipt(pos[0] || ""); if (!r) throw new Error(`No receipt ${pos[0]}.`);
+    console.log(`${r.id} memo: "${r.memo}"`);
+    if ((await ask("Remove this memo for good? Type yes: ")).trim().toLowerCase() !== "yes") return console.log("Kept.");
+    return console.log(line(view(redactMemo(r.id, opt("reason")))));
+  }
+  if (cmd === "cosign-message") {
+    const { getReceipt } = await import("../src/receipts.js"); const { cosignMessage } = await import("../src/cosign.js");
+    const r = getReceipt(pos[0] || ""); if (!r) throw new Error(`No receipt ${pos[0]}.`);
+    return console.log(`Send this text to the co-signer. They sign it as a message and send you the signature:\n\n${cosignMessage(r)}\n\nThen: reinpay approve ${r.id} --cosig=0x…`);
   }
   if (cmd === "statement" || (cmd === "share" && pos[0] === "check")) {
     const S = await import("../src/statement.js");
@@ -554,7 +637,7 @@ async function main() {
       return;
     }
     const { allReceipts } = await import("../src/receipts.js");
-    const st = S.buildStatement(allReceipts(), { wallet: P.requireWallet(), days: opt("days") || 30 });
+    const st = S.buildStatement(allReceipts(), { wallet: P.requireWallet(), days: opt("days") || 30, memos: !flags.has("--no-memos") });
     if (!K.isUnlocked()) requireTTY("statement");
     const signed = await S.signStatement(st, K.loadAccount(K.isUnlocked() ? undefined : await ask("Passphrase to sign the statement (hidden): ", { hidden: true })));
     const out = opt("out") || `reinpay-statement-${st.from}-to-${st.to}.json`;
@@ -581,6 +664,15 @@ async function main() {
     if (!n.ok) process.exitCode = 1;
     return;
   }
+  if (cmd === "books") {
+    if (!opt("month")) throw new Error("Usage: reinpay books --month=2026-11 [--csv | --json]");
+    const { monthRows, BOOK_COLS } = await import("../src/books.js");
+    const { allReceipts } = await import("../src/receipts.js");
+    const m = monthRows(allReceipts(), opt("month"), { memos: !flags.has("--no-memos") });
+    if (flags.has("--csv")) return process.stdout.write((await import("../src/csv.js")).toCSV(m.rows, BOOK_COLS));
+    if (flags.has("--json")) return console.log(JSON.stringify(m, null, 2));
+    return console.log(`${m.month}: ${m.count} sent payment${m.count === 1 ? "" : "s"} · ${Object.entries(m.totals).map(([t, v]) => `${v} ${t}`).join(", ") || "nothing"} · about ${m.usdTotal} USD${m.usdMissing ? ` (${m.usdMissing} without a USD value)` : ""}\nAdd --csv for a spreadsheet: reinpay books --month=${m.month} --csv > reinpay-${m.month}.csv`);
+  }
   if (cmd === "review") {
     const { review, reviewText } = await import("../src/review.js");
     const { allReceipts } = await import("../src/receipts.js");
@@ -596,11 +688,13 @@ async function main() {
     return;
   }
   if (cmd === "receipts") {
-    const list = P.listReceipts({ status: opt("status"), limit: 200 });
+    const fo = { status: opt("status"), payee: opt("payee"), token: opt("token"), since: opt("since"), until: opt("until"), memo: opt("memo"), rule: opt("rule"), session: opt("session"), min: opt("min"), max: opt("max") };
+    const list = P.listReceipts({ ...fo, limit: 200 });
     if (flags.has("--csv")) {
       const { toCSV, RECEIPT_COLS } = await import("../src/csv.js");
       const { allReceipts, view } = await import("../src/receipts.js");
-      const all = allReceipts().filter((r) => !opt("status") || r.status === opt("status")).map(view); // every receipt, oldest first
+      const { search } = await import("../src/search.js"); (await import("../src/chain.js")).syncTokens();
+      const all = search(allReceipts(), fo).map(view); // every matching receipt, oldest first
       return process.stdout.write(toCSV(all, RECEIPT_COLS));
     }
     return console.log(flags.has("--json") ? JSON.stringify(list, null, 2) : list.length ? list.map(line).join("\n") : "No receipts yet.");
@@ -610,7 +704,7 @@ async function main() {
 }
 
 // Commands that change rules, payees, tokens or notifications seal the config with the wallet key afterwards.
-const MUTATING = ["rule", "autosend"].includes(cmd) || (cmd === "schedule" && ["add", "remove", "pause", "resume"].includes(pos[0])) || (cmd === "grant" && pos[0] && pos[0] !== "list") || (cmd === "notify" && pos[0] !== "test") || (cmd === "payee" && ["add", "remove", "off", "on", "limit", "until", "import", "category", "prove"].includes(pos[0])) || (cmd === "token" && ["add", "remove"].includes(pos[0]));
+const MUTATING = ["rule", "autosend"].includes(cmd) || (cmd === "notify" && pos[0] === "memos") || (cmd === "schedule" && ["add", "remove", "pause", "resume"].includes(pos[0])) || (cmd === "grant" && pos[0] && pos[0] !== "list") || (cmd === "notify" && pos[0] !== "test") || (cmd === "payee" && ["add", "remove", "off", "on", "limit", "until", "import", "category", "prove"].includes(pos[0])) || (cmd === "token" && ["add", "remove"].includes(pos[0]));
 async function reseal(passphrase) {
   const K = await import("../src/keystore.js"), C = await import("../src/config.js"), { sealConfig } = await import("../src/seal.js");
   const pass = passphrase ?? (K.isUnlocked() ? undefined : await ask("Passphrase to seal your rules (hidden): ", { hidden: true }));

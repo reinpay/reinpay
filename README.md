@@ -187,6 +187,46 @@ Address poisoning scams send you dust from an address that starts and ends like 
 
 Two more read-only MCP tools: `spending_report` (sent, waiting and blocked per day and token, top payees, what blocked most) lets an agent answer "what did you spend this week?" from the receipts instead of guessing, and `review_rules` gives it the same suggestions as `reinpay review`, so it can pass them on to you with the commands to run. Neither can change anything, and both are available with `reinpay mcp --read-only`.
 
+### Session budgets
+
+`reinpay mcp --session=USDG:5,ETH:0.002` caps what one run of the MCP server may spend in all, on top of every other rule: a task gets 5 USDG, and when the agent host restarts the server, it is a new session. Tokens not named get nothing in that session. Receipts carry the session id, and `get_rules` shows the agent its session caps.
+
+### Finding receipts
+
+`reinpay receipts` takes filters: `--payee=` (part of a name, or an address), `--token=`, `--since=2026-11-01`, `--until=` (that whole day included), `--memo=` (text in the memo), `--rule=`, `--session=`, `--status=` (several with commas) and, with `--token`, `--min=` and `--max=`. They work with `--json` and `--csv` too, so `reinpay receipts --payee="GPU" --since=2026-11-01 --csv` is one month of one payee for a spreadsheet. The agent's `list_receipts` tool takes the same filters.
+
+### HTML report
+
+`reinpay report --html --out=report.html [--days=30]` writes the spending report as one self-contained page: totals per token with a bar chart per day, top payees, categories and what blocked most. It has no scripts and loads nothing from the internet, every name and memo is escaped, and it follows the reader's light or dark setting. Without `--out` it prints the page.
+
+### Two-person approval
+
+`reinpay rule cosign <0xaddress> <token> <amount>` sets a line above which a payment needs a second person: it waits for you (rule `co-sign`), and `reinpay approve` refuses until it also has a signature from that address. `reinpay cosign-message <RP-id>` prints the text to send them; it names your wallet, the receipt, the exact amount, token and payee, so a co-signature cannot be reused for anything else. Then `reinpay approve <RP-id> --cosig=0x…`. The co-signature is checked before the chain is read or your key is opened. `reinpay rule cosign off` removes it.
+
+### Max network fee
+
+`reinpay rule max-fee 0.0001` blocks a payment while its network fee would be above 0.0001 ETH (rule `network fee`). The fee is worked out from the mainnet simulation's gas and the current gas price, with the usual 20% margin, so a sudden spike in gas never surprises you. `off` removes it.
+
+### Books
+
+`reinpay books --month=2026-11` sums one month of sent payments; `--csv` gives one row per payment for a spreadsheet or an accountant: date, receipt, payee and address, category, token, amount, USD value, network fee, transaction and memo. The USD value is the one recorded at the time (USDG one to one, ETH at the stored two-pool price); payments made before USD values were recorded are counted and left blank rather than guessed. Memos that look like formulas stay text.
+
+### Notifications you can count on
+
+A Telegram or webhook message that fails because of a timeout, a 429 or a 5xx is tried again after 1 second and then 3 seconds. A 4xx such as a wrong token is not retried. `reinpay notify log [--last=50] [--json]` lists the last deliveries: when, which event and receipt, sent or failed, and how many tries. The log keeps only the type and host, never a bot token, a webhook path or a secret.
+
+### Memo privacy
+
+Memos can name clients or projects. `--no-memos` leaves them out of `reinpay statement`, `reinpay share` and `reinpay books`. `reinpay notify memos off` keeps them out of Telegram messages and webhook bodies. `reinpay redact <RP-id> [--reason=...]` (terminal only) removes one receipt's memo for good and notes on the receipt that it was redacted.
+
+### Connect your agent host
+
+`reinpay connect claude` (or `cursor`, `vscode`, `windsurf`, `codex`; no name prints them all) prints the exact command or config snippet for that host, with your flags: `--read-only`, `--session=USDG:5`, and `--profile=<name>`, which also gets its own server name. It only prints; it never edits a host's files. `reinpay mcp --check` starts the server the way a host does and lists its tools, so you know it works before you restart the host.
+
+### Staying up to date
+
+`reinpay --version --check` asks GitHub whether a newer Reinpay is out and, if so, prints the update command. It reads the public `package.json` and sends nothing about you or your wallet; updating is always your own command. `reinpay changelog [--since=0.20.0]` prints what changed, from the CHANGELOG of the version you have installed.
+
 ## Tools for the agent
 
 | Tool | What it does |
@@ -294,7 +334,7 @@ The repeat guard is 10 minutes, and `autosend` is off. A token with no daily bud
 npm test
 ```
 
-`test/rules.test.mjs` checks every rule offline, `test/lock.test.mjs` the spend lock (including two processes), `test/report.test.mjs` the spending report, `test/notify.test.mjs` the owner notifications, `test/csv.test.mjs` the CSV export and `test/profile.test.mjs` the profiles, `test/seal.test.mjs` the config seal and unlock, `test/guard.test.mjs` the lookalike guard, `test/verify.test.mjs` the on-chain receipt check and `test/doctor.test.mjs` the checkup and `test/freeze.test.mjs` the freeze, the circuit breaker and expiring payees, `test/paper.test.mjs` statements, the first-payment rule and the digest, `test/plan.test.mjs` grants, dry runs and backup/restore, `test/share.test.mjs` shared payee lists, signed webhooks and read-only MCP, `test/smart.test.mjs` category budgets, payment hours and the per-hour cap, `test/bills.test.mjs` payment links, schedules and budget alerts, `test/failclosed.test.mjs` the token-contract check when the chain cannot be read, `test/approvals.test.mjs` the memo rule and expiring requests, `test/fleet.test.mjs` the view across profiles, and `test/usd.test.mjs` the two-pool price and the dollar limits. `test/proof.test.mjs` payee proofs. `test/sharereceipt.test.mjs` shared receipts.  `test/review.test.mjs` the rule review.  `test/live.mjs` runs on mainnet:
+`test/rules.test.mjs` checks every rule offline, `test/lock.test.mjs` the spend lock (including two processes), `test/report.test.mjs` the spending report, `test/notify.test.mjs` the owner notifications, `test/csv.test.mjs` the CSV export and `test/profile.test.mjs` the profiles, `test/seal.test.mjs` the config seal and unlock, `test/guard.test.mjs` the lookalike guard, `test/verify.test.mjs` the on-chain receipt check and `test/doctor.test.mjs` the checkup and `test/freeze.test.mjs` the freeze, the circuit breaker and expiring payees, `test/paper.test.mjs` statements, the first-payment rule and the digest, `test/plan.test.mjs` grants, dry runs and backup/restore, `test/share.test.mjs` shared payee lists, signed webhooks and read-only MCP, `test/smart.test.mjs` category budgets, payment hours and the per-hour cap, `test/bills.test.mjs` payment links, schedules and budget alerts, `test/failclosed.test.mjs` the token-contract check when the chain cannot be read, `test/approvals.test.mjs` the memo rule and expiring requests, `test/fleet.test.mjs` the view across profiles, and `test/usd.test.mjs` the two-pool price and the dollar limits. `test/proof.test.mjs` payee proofs. `test/sharereceipt.test.mjs` shared receipts.  `test/review.test.mjs` the rule review.  `test/session.test.mjs` session budgets. `test/search.test.mjs` receipt filters. `test/htmlreport.test.mjs` the HTML report. `test/cosign.test.mjs` two-person approval. `test/fee.test.mjs` the max fee. `test/books.test.mjs` the monthly books. `test/retry.test.mjs` notification retries. `test/memos.test.mjs` memo privacy. `test/connect.test.mjs` host snippets and the server check. `test/update.test.mjs` the version check and changelog. `test/live.mjs` runs on mainnet:
 
 - USDG transfer simulations from a public holder, and tampered ones that must be refused;
 - the full flow with a throwaway wallet that has a pretend ETH balance only inside the simulation;

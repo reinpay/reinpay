@@ -36,3 +36,15 @@ export function view(r) {
   const { tx, _tx, ...rest } = r;
   return { ...rest, createdAt: new Date(r.createdAt).toISOString(), history: r.history.map((h) => ({ at: new Date(h.at).toISOString(), note: h.note })) };
 }
+
+/** Owner only: remove a receipt's memo for good, keeping a note that it was redacted. */
+export function redactMemo(id, why = "") {
+  const db = load();
+  const r = db.receipts.find((x) => x.id === String(id).toUpperCase());
+  if (!r) throw new Error(`No receipt ${id}.`);
+  if (r.memo === "[redacted]") return r;
+  r.memo = "[redacted]";
+  r.history.push({ at: Date.now(), note: `Memo redacted by the owner${why ? `: ${String(why).slice(0, 80)}` : ""}.` });
+  save(db);
+  return r;
+}

@@ -348,7 +348,21 @@ check("usd max 0.5: 0.0001 ETH (about 0.18 USD) passes the USD rule and gets its
   const SB = await import("../src/sandbox.js");
   const sb = await SB.runSandbox({ log: () => {} });
   check("sandbox: five requests, real rules, real simulation: ready, repeat, approval line, max, payee list", sb.map((r) => r.rule).join() === "within rules,repeat guard,approval line,max per payment,payee list" && !!sb[0].simulation?.block, sb.map((r) => r.status).join());
-  check("sandbox: puts REINPAY_HOME back and does not touch the test wallet", process.env.REINPAY_HOME === homeBefore && C.loadConfig().payees.some((p) => p.name === "Test payee")); }
+  check("sandbox: puts REINPAY_HOME back and does not touch the test wallet", process.env.REINPAY_HOME === homeBefore && C.loadConfig().payees.some((p) => p.name === "Test payee") && typeof S._getTestOverrides() === "function"); }
+
+// ---- 0.21: a session budget on a real MCP server run ----
+{ const ss = new Client({ name: "reinpay-live-session", version: "0.0.0" });
+  await ss.connect(new StdioClientTransport({ command: process.execPath, args: [fileURLToPath(new URL("../bin/reinpay.js", import.meta.url)), "mcp", "--session=ETH:0.0003"], env: { ...process.env, REINPAY_HOME: home } }));
+  const gr = JSON.parse((await ss.callTool({ name: "get_rules", arguments: {} })).content[0].text);
+  const sb = JSON.parse((await ss.callTool({ name: "request_payment", arguments: { payee: "Test payee", amount: "0.0004", token: "ETH", memo: "session test" } })).content[0].text);
+  await ss.close();
+  check("session budget over MCP: get_rules shows the cap, and 0.0004 ETH in a 0.0003 ETH session is blocked", gr.thisSession?.caps?.ETH === "0.0003" && sb.status === "blocked" && sb.rule === "session budget" && /^S-/.test(sb.session), `${sb.rule}`); }
+
+// ---- 0.25: max network fee against the real gas price ----
+{ const c0 = C.loadConfig(); c0.rules.maxFeeEth = "0.000000000000000001"; c0.rules.repeatGuardMinutes = 0; C.saveConfig(c0); }
+const mf = await rq("Test payee", "0.0001", "ETH", "fee test");
+check("max fee of 1 wei: the real mainnet fee is above it, so the payment is blocked by the network fee rule", mf.status === "blocked" && mf.rule === "network fee", mf.reason);
+{ const c0 = C.loadConfig(); delete c0.rules.maxFeeEth; C.saveConfig(c0); }
 
 console.log(`\n${pass} passed, ${fail} failed. No transaction was signed or sent.`);
 process.exit(fail ? 1 : 0);

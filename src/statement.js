@@ -10,14 +10,14 @@ const DAY = 86_400_000;
 const canon = (v) => (Array.isArray(v) ? v.map(canon) : v && typeof v === "object" ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, canon(v[k])])) : v);
 
 /** Pure: the unsigned statement for `days` local days back, today included. Only sent payments with a transaction. */
-export function buildStatement(receipts, { wallet, days = 30, now = Date.now() } = {}) {
+export function buildStatement(receipts, { wallet, days = 30, now = Date.now(), memos = true } = {}) {
   syncTokens();
   const n = Math.min(Math.max(Math.floor(Number(days) || 30), 1), 366);
   const from = localDay(now - (n - 1) * DAY), to = localDay(now);
   const payments = receipts
     .filter((r) => r.status === "sent" && r.txHash && localDay(r.createdAt) >= from && localDay(r.createdAt) <= to)
     .map((r) => ({ id: r.id, at: new Date(r.createdAt).toISOString(), payee: r.payee, payeeAddress: getAddress(r.payeeAddress), token: r.token,
-      tokenAddress: r.token === "ETH" ? null : getAddress(r.tokenAddress || TOKENS[r.token]?.address), amount: r.amount, amountRaw: String(r.amountRaw), txHash: r.txHash, block: r.block ? String(r.block) : null, memo: r.memo || "" }));
+      tokenAddress: r.token === "ETH" ? null : getAddress(r.tokenAddress || TOKENS[r.token]?.address), amount: r.amount, amountRaw: String(r.amountRaw), txHash: r.txHash, block: r.block ? String(r.block) : null, memo: memos ? r.memo || "" : "" }));
   const sums = {};
   for (const p of payments) sums[p.token] = (sums[p.token] || 0n) + BigInt(p.amountRaw);
   const decimals = (p) => (p === "ETH" ? 18 : TOKENS[p]?.decimals);
@@ -74,10 +74,10 @@ export function statementCheckText(st, res) {
 }
 
 /** A proof of one sent payment, to hand to the payee or anyone else: a one-payment statement marked as a receipt. */
-export function receiptProof(r, { wallet, now = Date.now() } = {}) {
+export function receiptProof(r, { wallet, now = Date.now(), memos = true } = {}) {
   if (!r) throw new Error("No such receipt.");
   if (r.status !== "sent" || !r.txHash) throw new Error(`${r.id} is ${r.status}; only sent payments can be shared.`);
   const day = localDay(r.createdAt);
-  const st = buildStatement([r], { wallet, days: 366, now: Math.max(now, r.createdAt) });
+  const st = buildStatement([r], { wallet, days: 366, now: Math.max(now, r.createdAt), memos });
   return { ...st, purpose: "receipt", from: day, to: day };
 }

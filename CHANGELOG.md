@@ -1,5 +1,58 @@
 # Changelog
 
+## 0.30.0 (unreleased): stay up to date
+
+- `reinpay --version --check`: compares the installed version with the public `package.json` on GitHub and prints the update command when a newer one is out. Never installs anything by itself.
+- `reinpay changelog [--since=X.Y.Z]`: the installed CHANGELOG, newest first.
+- Fixed: `reinpay sandbox` now puts back whatever simulation settings were in place before it ran, instead of clearing them. Found by the live tests.
+- Tests: 7 checks offline.
+
+## 0.29.0 (unreleased): connect
+
+- `reinpay connect [claude|cursor|vscode|windsurf|codex] [--read-only] [--session=]`: the command or config snippet for each host, with the right args and a per-profile server name. Prints only.
+- `reinpay mcp --check [--read-only]`: starts the MCP server over stdio and lists its tools.
+- Tests: 9 checks, including starting a real MCP server.
+
+## 0.28.0 (unreleased): memo privacy
+
+- `--no-memos` for `statement`, `share` and `books`; `reinpay notify memos <on|off>` for notifications (sealed); `reinpay redact <RP-id> [--reason=]` to remove a memo for good, with a note in the receipt's history.
+- Tests: 8 checks offline.
+
+## 0.27.0 (unreleased): reliable notifications
+
+- Notifications retry up to 3 times on timeouts, network errors, 429 and 5xx (waiting 1 s, then 3 s); other errors are not retried. Every delivery is logged in `notify-log.json` (last 200, type and host only). `reinpay notify log [--last=N] [--json]` shows it.
+- Tests: 6 checks offline, including that the bot token never reaches the log.
+
+## 0.26.0 (unreleased): books
+
+- `reinpay books --month=YYYY-MM [--csv | --json]`: one month of sent payments with totals per token, a USD total and a count of payments without a USD value. The CSV has one row per payment, formula-safe. (Named `books`, not `export`, because `reinpay export` shows the private key.)
+- Tests: 7 checks offline.
+
+## 0.25.0 (unreleased): max network fee
+
+- `reinpay rule max-fee <eth|off>`: a payment whose estimated network fee (simulated gas × gas price × 1.2) is above the line is blocked (rule `network fee`) on request, in `check_payment` and on approval.
+- Tests: 4 checks offline and 1 live check against the real gas price.
+
+## 0.24.0 (unreleased): two-person approval
+
+- `reinpay rule cosign <0xaddress> <token> <amount> | off`, `reinpay cosign-message <RP-id>` and `reinpay approve <RP-id> --cosig=0x…`: above the line, a payment waits (rule `co-sign`) and is only signed with a valid signature from the co-signer over a message naming that exact payment. Checked first, before anything else in an approval. The co-signer cannot be the wallet itself.
+- Tests: 11 checks offline.
+
+## 0.23.0 (unreleased): HTML report
+
+- `reinpay report --html [--out=report.html]`: a self-contained page with totals, an inline SVG bar chart per token, top payees, categories and blocked-by. No scripts, no outside requests, all receipt text escaped.
+- Tests: 7 checks offline, including a payee name that tries to inject markup.
+
+## 0.22.0 (unreleased): finding receipts
+
+- `reinpay receipts` filters: payee, token, since, until, memo, rule, session, several statuses, and min/max with a token. They apply to the list, `--json` and `--csv`. `list_receipts` over MCP takes the same filters.
+- Tests: 12 checks offline.
+
+## 0.21.0 (unreleased): session budgets
+
+- `reinpay mcp --session=TOKEN:amount,...`: a spending cap for one run of the MCP server (rule `session budget`), counting what that session sent or has waiting. Tokens not named are blocked in the session. Receipts store the session id; `get_rules` shows `thisSession`.
+- Tests: 11 checks offline and 1 live check over a real MCP server run.
+
 ## 0.20.0 (unreleased): the agent can explain
 
 - New read-only MCP tools `spending_report` and `review_rules` (eleven tools in all, ten in read-only mode). The agent can report spending from the receipts and pass rule suggestions to the owner; it still cannot change a rule.
