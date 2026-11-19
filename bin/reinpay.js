@@ -32,6 +32,8 @@ const HELP = `reinpay ${pkg.version} - a wallet for AI agents that only spends i
   reinpay approve <RP-id>                  Check the rules again, simulate again, then sign and send
   reinpay reject <RP-id>                   Refuse a waiting payment
   reinpay receipts [--status=sent] [--json | --csv]
+  reinpay verify <RP-id> | --all [--json]  Read sent payments back from the chain and check them against their receipts
+  reinpay doctor [--json]                  Check this computer's setup: Node, RPC, chain, wallet, seal, unlock, gas money, payees, budgets
   reinpay token add <0xaddress> | list | remove <SYMBOL>
                                            Spend another ERC-20 (checked on-chain and on Sourcify first)
   reinpay notify telegram <bot-token> <chat-id> | webhook <https-url> | off | test
@@ -156,7 +158,15 @@ async function main() {
     requireTTY("payee " + sub);
     if (sub === "add") {
       const tokens = opt("tokens") ? opt("tokens").toUpperCase().split(",") : undefined;
-      const p = await P.addPayee({ name, address, tokens, note: opt("note") });
+      let p;
+      try { p = await P.addPayee({ name, address, tokens, note: opt("note") }); }
+      catch (e) {
+        if (e.code !== "LOOKALIKE") throw e;
+        console.log(`\nCareful: ${e.message}\n\n  new:      ${address}\n  existing: ${e.like.address}  (${e.like.name})\n`);
+        const typed = (await ask("If you checked it and it is right, type the new address again in full: ")).trim();
+        if (typed.toLowerCase() !== String(address).toLowerCase()) { console.log("Not added. Nothing changed."); process.exit(1); }
+        p = await P.addPayee({ name, address, tokens, note: opt("note"), allowLookalike: true });
+      }
       return console.log(`Added ${p.name} ${p.address}${p.isContract ? " (a contract, not a personal wallet: make sure it can receive tokens)" : ""}.`);
     }
     if (sub === "remove") return console.log(`Removed ${P.removePayee(name).name}.`);
@@ -216,6 +226,26 @@ async function main() {
     }
     if (sub === "remove") return console.log(`Removed ${P.removeToken(arg)}. Its receipts stay.`);
     throw new Error("Usage: reinpay token <add <0xaddress>|list|remove <SYMBOL>>");
+  }
+  if (cmd === "verify") {
+    const { verifyReceipt } = await import("../src/verify.js");
+    const { allReceipts, getReceipt } = await import("../src/receipts.js");
+    const list = flags.has("--all") ? allReceipts().filter((r) => r.txHash) : [getReceipt(pos[0] || "")];
+    if (!flags.has("--all") && !list[0]) throw new Error(pos[0] ? `No receipt ${pos[0]}.` : "Usage: reinpay verify <RP-id> | --all");
+    const res = [];
+    for (const r of list) res.push(await verifyReceipt(r));
+    if (flags.has("--json")) console.log(JSON.stringify(res, null, 2));
+    else if (!res.length) console.log("No sent payments to check yet.");
+    else for (const v of res) console.log(v.reason ? `- ${v.id}: ${v.reason}` : `${v.ok ? "✓" : "✕"} ${v.id} ${v.ok ? "matches the chain" : "does NOT match the chain"}  ${v.explorer}\n${v.checks.map((c) => `    ${c.ok ? "✓" : "✕"} ${c.name}: ${c.detail}`).join("\n")}`);
+    if (res.some((v) => v.checks && !v.ok)) process.exitCode = 1;
+    return;
+  }
+  if (cmd === "doctor") {
+    const { doctor, doctorText } = await import("../src/doctor.js");
+    const checks = await doctor();
+    console.log(flags.has("--json") ? JSON.stringify(checks, null, 2) : doctorText(checks));
+    if (checks.some((c) => c.level === "fail")) process.exitCode = 1;
+    return;
   }
   if (cmd === "receipts") {
     const list = P.listReceipts({ status: opt("status"), limit: 200 });

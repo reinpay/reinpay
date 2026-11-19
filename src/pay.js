@@ -12,6 +12,7 @@ import { walletAddress, loadAccount, isUnlocked } from "./keystore.js";
 import { withLock } from "./lock.js";
 import { notifyOwner } from "./notify.js";
 import { checkSeal } from "./seal.js";
+import { findLookalike, LookalikeError } from "./lookalike.js";
 
 const FEE_MARGIN = 12n; // tenths: 1.2x the simulated gas
 
@@ -105,7 +106,7 @@ export async function requestPayment({ payee, amount, token = "USDG", memo = "" 
   const p = findPayee(cfg.payees, payee);
   const tokenPayee = p && p.isContract !== false ? await tokenAt(p.address) : null;
   const base = { by, wallet: from, chainId: CHAIN_ID, payee: p ? p.name : String(payee ?? ""), payeeAddress: p ? p.address : null,
-    token: symbol, amount: fmt(amountRaw, symbol).split(" ")[0], amountRaw: amountRaw.toString(), memo: String(memo).slice(0, 200) };
+    token: symbol, tokenAddress: TOKENS[symbol].address, amount: fmt(amountRaw, symbol).split(" ")[0], amountRaw: amountRaw.toString(), memo: String(memo).slice(0, 200) };
   // Decide, simulate and write the receipt as one step, so a second request cannot spend the same budget in between.
   // Once the receipt exists it counts against today's budget (waiting or sending), so signing can happen outside the lock.
   if (tokenPayee) return view(addReceipt({ ...base, status: "blocked", rule: "token contract", reason: `${p.name} (${p.address}) is the contract of ${tokenPayee}. Tokens sent to a token contract are usually stuck for good. Ask the owner to fix this payee.` }));
@@ -220,7 +221,7 @@ export async function walletStatus() {
 }
 
 // ---- payees (owner only, from the CLI) ----
-export async function addPayee({ name, address, tokens, note, maxPerPayment }) {
+export async function addPayee({ name, address, tokens, note, maxPerPayment, allowLookalike = false }) {
   syncTokens();
   if (tokens) for (const t of tokens) if (!TOKENS[t]) throw new Error(`Unknown token "${t}". Reinpay spends ${Object.keys(TOKENS).join(", ")}; add others with reinpay token add.`);
   if (!/^[\w .'-]{2,40}$/.test(String(name || ""))) throw new Error("Payee name: 2-40 letters, digits, spaces, dots, dashes or apostrophes.");
@@ -232,10 +233,12 @@ export async function addPayee({ name, address, tokens, note, maxPerPayment }) {
   const cfg = loadConfig();
   if (cfg.payees.some((p) => p.name.toLowerCase() === name.toLowerCase())) throw new Error(`A payee named "${name}" already exists.`);
   if (cfg.payees.some((p) => getAddress(p.address) === a)) throw new Error(`${a} is already on the list.`);
+  const like = findLookalike(a, [...cfg.payees, ...(walletAddress() ? [{ name: "your own wallet", address: walletAddress() }] : [])]);
+  if (like && !allowLookalike) throw new LookalikeError(a, like);
   const code = await publicClient().getCode({ address: a }).catch(() => null);
   const tok = code && code !== "0x" ? await tokenAt(a) : null;
   if (tok) throw new Error(`${a} is the contract of ${tok}, not a wallet. Tokens sent to a token contract are usually stuck for good. Use the recipient's own address.`);
-  const p = { name, address: a, ...(tokens ? { tokens } : {}), ...(note ? { note } : {}), ...(maxPerPayment ? { maxPerPayment } : {}), isContract: !!code && code !== "0x", addedAt: new Date().toISOString() };
+  const p = { name, address: a, ...(tokens ? { tokens } : {}), ...(note ? { note } : {}), ...(maxPerPayment ? { maxPerPayment } : {}), isContract: !!code && code !== "0x", ...(like ? { lookalikeConfirmed: like.name } : {}), addedAt: new Date().toISOString() };
   cfg.payees.push(p);
   saveConfig(cfg);
   return p;

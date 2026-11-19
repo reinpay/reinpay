@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.0 (unreleased): check it
+
+- `reinpay verify <RP-id>` (and `--all`) reads a sent payment back from Robinhood Chain and checks it against its receipt: on chain 4663, confirmed and succeeded, the same block, sent from your wallet, one transfer out to the payee, the exact amount of the right token, no ETH sent along with a token call. Each check says what it compared. New MCP tool `verify_receipt`, so an agent can check a payment before telling you it arrived.
+- Lookalike guard: `reinpay payee add` refuses an address that starts and ends like a payee you already have, or like your own wallet (address poisoning). To add it anyway you type the full address again. The payee is then marked as confirmed.
+- `reinpay doctor` (`--json`): nine read-only checks with what to do next: Node.js version, wallet, RPC, chain id, config seal, unlock, ETH for network fees, payees (including lookalike pairs) and daily budgets. Exits with 1 when something must be fixed.
+- Receipts now store the token contract address, so `verify` still works if a token is later removed from your list.
+- Tests: 12 guard, 14 verify and 20 doctor checks offline, plus 17 new live mainnet checks. All passing. Nothing is signed or sent.
+
 ## 0.5.0 (unreleased): hardening
 
 - Config seal: every change made with the owner's terminal commands (`rule`, `payee`, `token`, `notify`, `autosend`, and `init`) is signed with the wallet's own key. Before anything is signed, `reinpay approve` and autosend check that signature. If `config.json` was edited any other way (an agent with file access adding itself as a payee, raising a budget, turning autosend on), nothing is signed until the owner checks `reinpay rules` and runs `reinpay seal`. Existing wallets: run `reinpay seal` once after updating.

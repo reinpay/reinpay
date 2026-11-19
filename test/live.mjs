@@ -194,7 +194,7 @@ const { StdioClientTransport } = await import("@modelcontextprotocol/sdk/client/
 const mcp = new Client({ name: "reinpay-live-test", version: "0.0.0" });
 await mcp.connect(new StdioClientTransport({ command: process.execPath, args: [fileURLToPath(new URL("../bin/reinpay.js", import.meta.url)), "mcp"], env: { ...process.env, REINPAY_HOME: home } }));
 const names = (await mcp.listTools()).tools.map((t) => t.name).sort();
-check(`the agent gets 5 tools (${names.join(", ")})`, names.join() === "get_receipt,get_rules,list_receipts,request_payment,wallet_status");
+check(`the agent gets 6 tools (${names.join(", ")})`, names.join() === "get_receipt,get_rules,list_receipts,request_payment,verify_receipt,wallet_status");
 check("no tool can approve, reject or change rules or payees", !names.some((n) => /approve|reject|rule_set|payee|unlock|autosend/.test(n)));
 const call = async (name, args = {}) => { const r = await mcp.callTool({ name, arguments: args }); return { err: !!r.isError, text: r.content.map((x) => x.text).join("") }; };
 const rules = JSON.parse((await call("get_rules")).text);
@@ -211,7 +211,57 @@ const list = JSON.parse((await call("list_receipts", { limit: 5 })).text);
 check("list_receipts returns the newest first", list.length === 5 && list[0].id === m2.id);
 const one2 = JSON.parse((await call("get_receipt", { id: r1.id })).text);
 check("get_receipt shows the history of an approval that was refused", one2.history.some((h) => /Approval refused/.test(h.note)));
+const mv = JSON.parse((await call("verify_receipt", { id: r1.id })).text);
+check("verify_receipt over MCP: a receipt that was never sent has nothing to check", mv.ok === false && /nothing was sent/.test(mv.reason));
 await mcp.close();
+
+// ---- 0.6: verify real public payments, doctor against the real RPC, lookalike guard ----
+const V = await import("../src/verify.js");
+// Real public payments from the last few hundred blocks: a direct ERC-20 transfer() call (any token) and a plain ETH payment.
+let real = null, ethTx = null;
+const TT = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+for (let b = head; b > head - 1500n && (!real || !ethTx); b--) {
+  const blk = await c.getBlock({ blockNumber: b, includeTransactions: true });
+  for (const t of blk.transactions) {
+    if (!ethTx && t.to && t.input === "0x" && t.value > 0n) ethTx = t;
+    if (real || !t.to || t.value !== 0n || !t.input.startsWith("0xa9059cbb") || t.input.length !== 138) continue;
+    const rc = await c.getTransactionReceipt({ hash: t.hash });
+    const outs = rc.logs.filter((x) => getAddress(x.address) === getAddress(t.to) && x.topics[0] === TT && x.topics[1]?.toLowerCase() === "0x" + t.from.slice(2).toLowerCase().padStart(64, "0"));
+    if (rc.status !== "success" || outs.length !== 1) continue;
+    real = { id: "RP-PUBLIC", status: "sent", token: "TOKEN", tokenAddress: getAddress(t.to), txHash: t.hash, wallet: getAddress(t.from),
+      payeeAddress: getAddress("0x" + outs[0].topics[2].slice(26)), amountRaw: BigInt(outs[0].data).toString(), block: String(rc.blockNumber) };
+  }
+}
+check("found a recent public ERC-20 transfer to check", !!real, real && `${real.txHash} on ${real.tokenAddress}`);
+const v1 = await V.verifyReceipt(real);
+check("verify: that real token transfer matches a receipt written from it", v1.ok, `${v1.checks.length} checks, block ${real.block}`);
+check("verify: the same transaction with a different payee does not match", !(await V.verifyReceipt({ ...real, payeeAddress: OTHER })).ok);
+check("verify: one unit more than was paid does not match", !(await V.verifyReceipt({ ...real, amountRaw: (BigInt(real.amountRaw) + 1n).toString() })).ok);
+check("verify: another wallet as the sender does not match", !(await V.verifyReceipt({ ...real, wallet: OTHER })).ok);
+check("verify: another token contract does not match", !(await V.verifyReceipt({ ...real, tokenAddress: U })).ok);
+check("verify: called ETH instead of the token does not match", !(await V.verifyReceipt({ ...real, token: "ETH" })).ok);
+if (ethTx) {
+  const erc = await c.getTransactionReceipt({ hash: ethTx.hash });
+  const rEth = { id: "RP-PUBLIC-ETH", status: "sent", token: "ETH", txHash: ethTx.hash, wallet: ethTx.from, payeeAddress: ethTx.to, amountRaw: ethTx.value.toString(), block: String(erc.blockNumber) };
+  const ve = await V.verifyReceipt(rEth);
+  check(`verify: a real plain ETH payment matches (${erc.status})`, ve.ok === (erc.status === "success"), ethTx.hash);
+  check("verify: that ETH payment with a different amount does not match", !(await V.verifyReceipt({ ...rEth, amountRaw: "1" })).ok);
+} else check("found a recent plain ETH payment", false);
+check("verify: a made-up transaction hash does not match and does not throw", !(await V.verifyReceipt({ ...real, txHash: "0x" + "ab".repeat(32) })).ok);
+
+const D = await import("../src/doctor.js");
+const dr = await D.doctor();
+const dget = (n) => dr.find((x) => x.name === n);
+check("doctor: the real RPC answers and is chain 4663", dget("rpc").level === "ok" && dget("chain").level === "ok", dget("rpc").detail);
+check("doctor: reads the gas price and the (pretend 1 ETH) balance", dget("gas money").level === "ok", dget("gas money").detail);
+check("doctor: 9 checks", dr.length === 9, dr.map((x) => `${x.name}:${x.level}`).join(" "));
+
+const FAKE_DEAD = "0x0000" + "1".repeat(32) + "dead";
+let le = null; try { await P.addPayee({ name: "Lookalike", address: FAKE_DEAD }); } catch (e) { le = e; }
+check("payee add refuses an address that starts and ends like the burn address payee", le?.code === "LOOKALIKE");
+const lp = await P.addPayee({ name: "Lookalike", address: FAKE_DEAD, allowLookalike: true });
+check("after the owner confirms, it is added and marked as confirmed", lp.lookalikeConfirmed === "Test payee");
+check("doctor: shows the confirmed lookalike as something to look at", (await D.doctor()).find((x) => x.name === "payees").level === "warn");
 
 console.log(`\n${pass} passed, ${fail} failed. Nothing was signed or sent.`);
 process.exit(fail ? 1 : 0);

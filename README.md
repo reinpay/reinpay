@@ -72,7 +72,13 @@ reinpay report                    # last 7 days: sent, waiting, blocked, top pay
 reinpay autosend on               # optional: send payments inside every rule without asking
 reinpay unlock --for=2h           # needed for autosend; expires on its own (reinpay lock ends it now)
 reinpay seal                      # after updating to 0.5.0, or if config.json was changed by hand
+reinpay verify RP-00012           # read a sent payment back from the chain and check it (--all for every one)
+reinpay doctor                    # check the whole setup: Node, RPC, chain, wallet, seal, unlock, gas money, payees, budgets
 ```
+
+### Lookalike payees
+
+Address poisoning scams send you dust from an address that starts and ends like one you already pay, hoping you copy it from your history. `reinpay payee add` refuses a new address whose first and last 4 characters match a payee you already have, or your own wallet, and shows both side by side. If you checked it with the payee and it is right, type the new address again in full to add it anyway. `reinpay doctor` keeps pointing at such pairs.
 
 ## Tools for the agent
 
@@ -83,6 +89,7 @@ reinpay seal                      # after updating to 0.5.0, or if config.json w
 | `request_payment` | Ask for one payment; returns the decision and the receipt |
 | `get_receipt` | One receipt by id |
 | `list_receipts` | Recent receipts, optionally by status |
+| `verify_receipt` | Read a sent payment back from the chain and check it against its receipt |
 
 ## One wallet per agent
 
@@ -175,14 +182,16 @@ The repeat guard is 10 minutes, and `autosend` is off. A token with no daily bud
 npm test
 ```
 
-`test/rules.test.mjs` checks every rule offline, `test/lock.test.mjs` the spend lock (including two processes), `test/report.test.mjs` the spending report, `test/notify.test.mjs` the owner notifications, `test/csv.test.mjs` the CSV export and `test/profile.test.mjs` the profiles. `test/live.mjs` runs on mainnet:
+`test/rules.test.mjs` checks every rule offline, `test/lock.test.mjs` the spend lock (including two processes), `test/report.test.mjs` the spending report, `test/notify.test.mjs` the owner notifications, `test/csv.test.mjs` the CSV export and `test/profile.test.mjs` the profiles, `test/seal.test.mjs` the config seal and unlock, `test/guard.test.mjs` the lookalike guard, `test/verify.test.mjs` the on-chain receipt check and `test/doctor.test.mjs` the checkup. `test/live.mjs` runs on mainnet:
 
 - USDG transfer simulations from a public holder, and tampered ones that must be refused;
 - the full flow with a throwaway wallet that has a pretend ETH balance only inside the simulation;
 - two requests at the same moment against one budget, and a payee's own daily budget;
 - a token contract refused as a payee, weekly budgets, and a notification attempt logged on the receipt;
 - a Sourcify-verified token added and spent only after its budget is set, and an unverified one refused;
-- the MCP server over stdio.
+- the MCP server over stdio;
+- `verify` against a real public token transfer and a real ETH payment from the last few hundred blocks, and altered copies that must not match;
+- `doctor` against the real RPC, and the lookalike guard.
 
 Nothing is signed or sent.
 
