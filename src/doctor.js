@@ -6,6 +6,7 @@ import { loadConfig } from "./config.js";
 import { keystoreExists, walletAddress, isUnlocked, unlockedUntil } from "./keystore.js";
 import { checkSeal } from "./seal.js";
 import { lookalikePairs, looksLike } from "./lookalike.js";
+import { frozen, breakerOf } from "./freeze.js";
 
 export const MIN_NODE = [22, 12];
 const TRANSFER_GAS = 80_000n; // a little above a plain ERC-20 transfer
@@ -71,6 +72,10 @@ export async function doctor({ client = publicClient(), now = Date.now() } = {})
       push("gas money", bal === 0n ? "fail" : n < FEW_PAYMENTS ? "warn" : "ok", `${formatEther(bal)} ETH, about ${n > 100000n ? "100000+" : n} payments of network fees`, bal === 0n ? "send a little ETH on Robinhood Chain to " + wallet : n < FEW_PAYMENTS ? "top up a little ETH soon" : null);
     } catch (e) { push("gas money", "warn", `could not read the balance (${e.shortMessage || e.message})`); }
   }
+  const fz = frozen();
+  const br = cfg ? breakerOf(cfg.rules) : null;
+  if (fz) push("brakes", "warn", `frozen since ${fz.at} by ${fz.by}: ${fz.reason}`, "check reinpay receipts, then reinpay unfreeze");
+  else push("brakes", br ? "ok" : "warn", br ? `not frozen; the breaker freezes after ${br.count} blocked requests in ${br.minutes} minutes` : "not frozen; the circuit breaker is off", br ? null : "reinpay rule breaker 5 10");
   if (cfg) out.push(...configChecks(cfg, wallet));
   return out;
 }

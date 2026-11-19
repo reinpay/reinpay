@@ -75,6 +75,7 @@ export function decide({ rules, receipts, request, now = Date.now(), excludeId =
   if (!TOKENS[symbol]) return { status: "blocked", rule: "tokens", reason: `${symbol} is not a token Reinpay spends.` };
   if (!payee) return { status: "blocked", rule: "payee list", reason: "This payee is not on your payee list. Only the owner can add payees (reinpay payee add)." };
   if (payee.disabled) return { status: "blocked", rule: "payee list", reason: `${payee.name} is on the list but switched off.` };
+  if (payee.expiresAt && Date.parse(payee.expiresAt) <= now) return { status: "blocked", rule: "payee expired", reason: `${payee.name} expired on ${payee.expiresAt}. Only the owner can renew it (reinpay payee until "${payee.name}" 30d).` };
   if (payee.tokens && !payee.tokens.includes(symbol)) return { status: "blocked", rule: "payee tokens", reason: `${payee.name} may only be paid in ${payee.tokens.join(" or ")}.` };
   if (!(amountRaw > 0n)) return { status: "blocked", rule: "amount", reason: "The amount must be above zero." };
 
@@ -117,4 +118,13 @@ export function decide({ rules, receipts, request, now = Date.now(), excludeId =
   const line = limit(rules, "approveAbove", symbol);
   if (line !== null && amountRaw > line) return { status: "needs_approval", rule: "approval line", reason: `${fmt(amountRaw, symbol)} is above your approval line of ${fmt(line, symbol)}.` };
   return { status: "allowed", rule: "within rules", reason: "Inside every rule." };
+}
+
+/** "30d", "12h", "90m" as milliseconds; "off" as null. Throws on anything else. */
+export function parseDuration(s) {
+  const v = String(s ?? "").trim().toLowerCase();
+  if (v === "off") return null;
+  const m = /^(\d{1,5})(m|h|d)$/.exec(v);
+  if (!m || Number(m[1]) === 0) throw new Error(`"${s}" is not a duration. Use something like 90m, 12h or 30d (or off).`);
+  return Number(m[1]) * { m: 60_000, h: 3_600_000, d: 86_400_000 }[m[2]];
 }

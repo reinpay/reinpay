@@ -24,8 +24,12 @@ const HELP = `reinpay ${pkg.version} - a wallet for AI agents that only spends i
   reinpay rule <name> <token> <amount>     Set daily | weekly | monthly | max | approve-above for a token, e.g. reinpay rule daily USDG 50
                                            (weekly and monthly accept "off"; weeks start on Monday, local time)
   reinpay rule repeat-guard <minutes>      Hold repeats of the same payment for that long (0 turns it off)
+  reinpay rule breaker <count> <minutes> | off   Freeze when the agent is blocked that often (default 5 in 10 minutes)
+  reinpay freeze [reason]                  Stop every payment now (requests, autosend, approvals)
+  reinpay unfreeze                         Start again after checking reinpay receipts. Terminal only.
   reinpay autosend <on|off>                Send payments that are inside every rule without asking (needs unlock)
-  reinpay payee add <name> <0xaddress> [--tokens=USDG,ETH] [--note=...]
+  reinpay payee add <name> <0xaddress> [--tokens=USDG,ETH] [--note=...] [--until=30d]
+  reinpay payee until <name> <30d|12h|off> A payee that expires on its own
   reinpay payee list | remove <name> | off <name> | on <name>
   reinpay payee limit <name> <daily|max> <USDG|ETH> <amount|off>   A payee's own daily budget or max per payment
   reinpay pending                          Payments waiting for you
@@ -121,16 +125,39 @@ async function main() {
     if ((await ask("Seal these rules and payees with your wallet key? Type yes: ")).trim().toLowerCase() !== "yes") return console.log("Not sealed.");
     return reseal();
   }
+  if (cmd === "freeze") {
+    const F = await import("../src/freeze.js");
+    const was = F.frozen();
+    const f = F.freeze({ by: "owner", reason: pos.join(" ") || "Frozen by the owner." });
+    return console.log(was ? `Already frozen since ${was.at} (${was.reason}).` : `Frozen. Every payment request is blocked, autosend stops and approvals are refused.\nCheck reinpay receipts, then run reinpay unfreeze when you are ready.`);
+  }
+  if (cmd === "unfreeze") {
+    requireTTY("unfreeze");
+    const F = await import("../src/freeze.js");
+    const f = F.frozen();
+    if (!f) return console.log("Not frozen.");
+    console.log(`Frozen since ${f.at} by ${f.by}: ${f.reason}`);
+    if ((await ask("Did you check reinpay receipts? Type yes to unfreeze: ")).trim().toLowerCase() !== "yes") return console.log("Still frozen.");
+    F.unfreeze();
+    return console.log("Unfrozen. Payments follow your rules again.");
+  }
   if (cmd === "lock") { K.lock(); return console.log("Locked. The passphrase file is removed."); }
   if (cmd === "export") { requireTTY("export"); console.log(K.exportKey(await ask("Passphrase (hidden): ", { hidden: true }))); return; }
-  if (cmd === "status") { const st = await P.walletStatus(); st.configSeal = await P.sealStatus(); st.unlockedUntil = K.isUnlocked() ? (K.unlockedUntil() ? new Date(K.unlockedUntil()).toISOString() : "until reinpay lock") : null; return console.log(JSON.stringify(st, null, 2)); }
+  if (cmd === "status") { const st = await P.walletStatus(); st.configSeal = await P.sealStatus(); st.unlockedUntil = K.isUnlocked() ? (K.unlockedUntil() ? new Date(K.unlockedUntil()).toISOString() : "until reinpay lock") : null; st.frozen = (await import("../src/freeze.js")).frozen(); return console.log(JSON.stringify(st, null, 2)); }
   if (cmd === "rules") return console.log(JSON.stringify(P.rulesView(), null, 2));
 
   if (cmd === "rule") {
     requireTTY("rule");
     const cfg = C.loadConfig();
     const [name, a1, a2] = pos;
-    if (name === "repeat-guard") {
+    if (name === "breaker") {
+      if (String(a1).toLowerCase() === "off") cfg.rules.breaker = "off";
+      else {
+        const n = Number(a1), m = Number(a2);
+        if (!(Number.isInteger(n) && n >= 1 && n <= 100 && Number.isInteger(m) && m >= 1 && m <= 1440)) throw new Error("Usage: reinpay rule breaker <count 1-100> <minutes 1-1440> | off");
+        cfg.rules.breaker = { count: n, minutes: m };
+      }
+    } else if (name === "repeat-guard") {
       const m = Number(a1); if (!(m >= 0 && m <= 1440)) throw new Error("Minutes between 0 and 1440.");
       cfg.rules.repeatGuardMinutes = m;
     } else {
@@ -159,24 +186,30 @@ async function main() {
     if (sub === "add") {
       const tokens = opt("tokens") ? opt("tokens").toUpperCase().split(",") : undefined;
       let p;
-      try { p = await P.addPayee({ name, address, tokens, note: opt("note") }); }
+      const untilMs = opt("until") ? (await import("../src/rules.js")).parseDuration(opt("until")) : null;
+      try { p = await P.addPayee({ name, address, tokens, note: opt("note"), untilMs }); }
       catch (e) {
         if (e.code !== "LOOKALIKE") throw e;
         console.log(`\nCareful: ${e.message}\n\n  new:      ${address}\n  existing: ${e.like.address}  (${e.like.name})\n`);
         const typed = (await ask("If you checked it and it is right, type the new address again in full: ")).trim();
         if (typed.toLowerCase() !== String(address).toLowerCase()) { console.log("Not added. Nothing changed."); process.exit(1); }
-        p = await P.addPayee({ name, address, tokens, note: opt("note"), allowLookalike: true });
+        p = await P.addPayee({ name, address, tokens, note: opt("note"), allowLookalike: true, untilMs });
       }
-      return console.log(`Added ${p.name} ${p.address}${p.isContract ? " (a contract, not a personal wallet: make sure it can receive tokens)" : ""}.`);
+      return console.log(`Added ${p.name} ${p.address}${p.expiresAt ? `, until ${p.expiresAt}` : ""}${p.isContract ? " (a contract, not a personal wallet: make sure it can receive tokens)" : ""}.`);
     }
     if (sub === "remove") return console.log(`Removed ${P.removePayee(name).name}.`);
+    if (sub === "until") {
+      const ms = (await import("../src/rules.js")).parseDuration(pos[2]);
+      const p = P.setPayee(name, { expiresAt: ms ? new Date(Date.now() + ms).toISOString() : undefined });
+      return console.log(ms ? `${p.name} can be paid until ${p.expiresAt}.` : `${p.name} no longer expires.`);
+    }
     if (sub === "off" || sub === "on") return console.log(`${P.setPayee(name, { disabled: sub === "off" }).name} is ${sub}.`);
     if (sub === "limit") {
       const [, , kind, tok, amount] = pos;
       const p = P.setPayeeLimit(name, kind, tok, amount);
       return console.log(`${p.name}: daily ${JSON.stringify(p.daily || {})}, max per payment ${JSON.stringify(p.maxPerPayment || {})}.`);
     }
-    throw new Error("Usage: reinpay payee <add|list|remove|off|on|limit>");
+    throw new Error("Usage: reinpay payee <add|list|remove|off|on|limit|until>");
   }
   if (cmd === "pending") {
     const list = [...P.listReceipts({ status: "needs_approval", limit: 200 }), ...P.listReceipts({ status: "ready", limit: 200 })];
@@ -262,7 +295,7 @@ async function main() {
 }
 
 // Commands that change rules, payees, tokens or notifications seal the config with the wallet key afterwards.
-const MUTATING = ["rule", "autosend"].includes(cmd) || (cmd === "notify" && pos[0] !== "test") || (cmd === "payee" && ["add", "remove", "off", "on", "limit"].includes(pos[0])) || (cmd === "token" && ["add", "remove"].includes(pos[0]));
+const MUTATING = ["rule", "autosend"].includes(cmd) || (cmd === "notify" && pos[0] !== "test") || (cmd === "payee" && ["add", "remove", "off", "on", "limit", "until"].includes(pos[0])) || (cmd === "token" && ["add", "remove"].includes(pos[0]));
 async function reseal(passphrase) {
   const K = await import("../src/keystore.js"), C = await import("../src/config.js"), { sealConfig } = await import("../src/seal.js");
   const pass = passphrase ?? (K.isUnlocked() ? undefined : await ask("Passphrase to seal your rules (hidden): ", { hidden: true }));

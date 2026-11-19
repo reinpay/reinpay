@@ -35,10 +35,10 @@ export function parseNotify(kind, a, b) {
 }
 
 /** Send one notification for a receipt. Resolves to { ok, detail }; never throws. `opts.fetch` and `opts.allowHttp` are for tests. */
-export async function notifyOwner(r, { cfg = loadConfig(), fetch: f = globalThis.fetch, allowHttp = false } = {}) {
+export async function notifyOwner(r, { cfg = loadConfig(), fetch: f = globalThis.fetch, allowHttp = false, text: override = null, event = "payment_waiting" } = {}) {
   const n = cfg.notify;
   if (!n) return { ok: false, detail: "off" };
-  const text = message(r);
+  const text = override || message(r);
   let url, body;
   if (n.type === "telegram") {
     url = `${n.apiBase || "https://api.telegram.org"}/bot${n.botToken}/sendMessage`;
@@ -46,7 +46,7 @@ export async function notifyOwner(r, { cfg = loadConfig(), fetch: f = globalThis
   } else if (n.type === "webhook") {
     url = n.url;
     if (!url.startsWith("https://") && !allowHttp) return { ok: false, detail: "webhook is not https" };
-    body = { event: "payment_waiting", id: r.id, payee: r.payee, payeeAddress: r.payeeAddress, token: r.token, amount: r.amount, memo: clip(r.memo, 200), rule: r.rule, reason: r.reason, status: r.status, text };
+    body = { event, id: r.id, payee: r.payee, payeeAddress: r.payeeAddress, token: r.token, amount: r.amount, memo: clip(r.memo, 200), rule: r.rule, reason: r.reason, status: r.status, text };
   } else return { ok: false, detail: "unknown notify type" };
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), TIMEOUT_MS);

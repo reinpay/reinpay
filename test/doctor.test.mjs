@@ -31,7 +31,7 @@ check("no wallet yet: fail with reinpay init", by(all, "wallet").level === "fail
 const pk = generatePrivateKey(); const me = K.writeKeystore(pk, "throwaway-test-passphrase");
 C.saveConfig(await sealConfig({ ...C.DEFAULT_CONFIG, payees: [{ name: "Burn", address: DEAD }] }, privateKeyToAccount(pk)));
 all = await D.doctor({ client: fake() });
-check("healthy setup: 9 checks, none failing", all.length === 9 && !all.some((c) => c.level === "fail"), all.map((c) => `${c.name}:${c.level}`).join(" "));
+check("healthy setup: 10 checks, none failing", all.length === 10 && !all.some((c) => c.level === "fail"), all.map((c) => `${c.name}:${c.level}`).join(" "));
 check("sealed config: ok", by(all, "config seal").level === "ok");
 check("locked with autosend off: ok", by(all, "unlock").level === "ok");
 check("0.01 ETH covers many fees: ok", by(all, "gas money").level === "ok");
@@ -48,7 +48,13 @@ check("unlocked with an end time: ok", by(await D.doctor({ client: fake() }), "u
 K.unlock("throwaway-test-passphrase", 0);
 check("unlocked with no end time: warn", by(await D.doctor({ client: fake() }), "unlock").level === "warn");
 K.lock();
+const Fz = await import("../src/freeze.js");
+check("not frozen, breaker on: brakes ok", by(await D.doctor({ client: fake() }), "brakes").level === "ok");
+Fz.freeze({ by: "breaker", reason: "test trip" });
+const fb = by(await D.doctor({ client: fake() }), "brakes");
+check("frozen: brakes warn, says who froze it and how to unfreeze", fb.level === "warn" && /breaker/.test(fb.detail) && /unfreeze/.test(fb.fix));
+Fz.unfreeze();
 const txt = D.doctorText(all);
-check("text output ends with the summary line", /9 checks · 0 to fix/.test(txt));
+check("text output ends with the summary line", /10 checks · 0 to fix/.test(txt));
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

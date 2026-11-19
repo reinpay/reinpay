@@ -13,6 +13,7 @@ import { withLock } from "./lock.js";
 import { notifyOwner } from "./notify.js";
 import { checkSeal } from "./seal.js";
 import { findLookalike, LookalikeError } from "./lookalike.js";
+import { frozen, freeze, tripped, breakerOf } from "./freeze.js";
 
 const FEE_MARGIN = 12n; // tenths: 1.2x the simulated gas
 
@@ -109,8 +110,9 @@ export async function requestPayment({ payee, amount, token = "USDG", memo = "" 
     token: symbol, tokenAddress: TOKENS[symbol].address, amount: fmt(amountRaw, symbol).split(" ")[0], amountRaw: amountRaw.toString(), memo: String(memo).slice(0, 200) };
   // Decide, simulate and write the receipt as one step, so a second request cannot spend the same budget in between.
   // Once the receipt exists it counts against today's budget (waiting or sending), so signing can happen outside the lock.
-  if (tokenPayee) return view(addReceipt({ ...base, status: "blocked", rule: "token contract", reason: `${p.name} (${p.address}) is the contract of ${tokenPayee}. Tokens sent to a token contract are usually stuck for good. Ask the owner to fix this payee.` }));
-  const r = await withLock(async () => {
+  const fz = frozen();
+  if (fz) return view(addReceipt({ ...base, status: "blocked", rule: "frozen", reason: `Reinpay is frozen (${fz.reason}). Nothing is paid until the owner runs reinpay unfreeze.` }));
+  const r = tokenPayee ? addReceipt({ ...base, status: "blocked", rule: "token contract", reason: `${p.name} (${p.address}) is the contract of ${tokenPayee}. Tokens sent to a token contract are usually stuck for good. Ask the owner to fix this payee.` }) : await withLock(async () => {
     const d = decide({ rules: cfg.rules, receipts: allReceipts(), request: { payee: p, token: symbol, amountRaw } });
     if (d.status === "blocked") return addReceipt({ ...base, status: "blocked", rule: d.rule, reason: d.reason });
     const ch = await check(from, symbol, p.address, amountRaw);
@@ -121,7 +123,18 @@ export async function requestPayment({ payee, amount, token = "USDG", memo = "" 
     if (status === "sending") rec._tx = ch.tx; // kept in memory only, never written to disk
     return rec;
   });
+  if (r.status === "blocked" && by === "agent") {
+    const t = tripped(allReceipts(), cfg.rules);
+    if (t && !frozen()) {
+      const f = freeze({ by: "breaker", reason: `circuit breaker: the agent was blocked ${t.count} times in ${t.minutes} minutes (${t.ids.slice(-5).join(", ")})` });
+      let note = `Circuit breaker: Reinpay is now frozen (${f.reason}).`;
+      if (cfg.notify) { const n = await notifyOwner(r, { cfg, event: "frozen", text: `Reinpay froze itself: ${f.reason}.\nNothing will be paid until you check reinpay receipts and run reinpay unfreeze in your terminal.` }); note += n.ok ? ` Owner notified (${n.detail}).` : ` Owner notification failed (${n.detail}).`; }
+      return view(updateReceipt(r.id, {}, note));
+    }
+  }
   if (r.status === "sending") {
+    const fz2 = frozen();
+    if (fz2) return view(updateReceipt(r.id, { status: "needs_approval", rule: "frozen", reason: `Not sent: Reinpay was frozen (${fz2.reason}).` }, "Autosend stopped: frozen."));
     const sc = await checkSeal(loadConfig(), from);
     if (!sc.ok) return view(updateReceipt(r.id, { status: "needs_approval", rule: "config seal", reason: `Not sent: ${sc.reason}. The owner checks the rules and runs reinpay seal.` }, "Autosend stopped: config not sealed."));
     return view(await sendNow(r, r._tx, loadAccount()));
@@ -139,6 +152,8 @@ export async function approve(id, { passphrase } = {}) {
   if (!pre) throw new Error(`No receipt ${id}.`);
   if (!["needs_approval", "ready"].includes(pre.status)) throw new Error(`${pre.id} is ${pre.status}; only waiting payments can be approved.`);
   // The account is opened before the lock, so a wrong passphrase fails before anything changes.
+  const fz = frozen();
+  if (fz) throw new Error(`Reinpay is frozen (${fz.reason}). Check reinpay receipts, then run reinpay unfreeze before approving.`);
   const account = loadAccount(passphrase);
   const done = await withLock(async () => {
     const r = getReceipt(id);
@@ -194,9 +209,10 @@ export function rulesView(now = Date.now()) {
     };
   }
   return {
+    frozen: frozen(), circuitBreaker: breakerOf(cfg.rules) ? `freezes after ${breakerOf(cfg.rules).count} blocked requests in ${breakerOf(cfg.rules).minutes} minutes` : "off",
     tokens: per, repeatGuardMinutes: cfg.rules.repeatGuardMinutes, autoSend: !!cfg.rules.autoSend, walletUnlocked: isUnlocked(),
     ownerNotifiedBy: cfg.notify?.type || null,
-    payees: cfg.payees.filter((p) => !p.disabled).map((p) => {
+    payees: cfg.payees.filter((p) => !p.disabled && !(p.expiresAt && Date.parse(p.expiresAt) <= now)).map((p) => {
       const tokens = p.tokens || Object.keys(TOKENS);
       const lim = {};
       for (const t of tokens) {
@@ -205,7 +221,7 @@ export function rulesView(now = Date.now()) {
         const { spent, held } = totals(allReceipts(), t, now, p.address);
         lim[t] = { ...(m != null ? { maxPerPayment: `${m} ${t}` } : {}), ...(d != null ? { dailyBudget: `${d} ${t}`, leftToday: fmt(maxZero(parseAmount(String(d), t) - spent - held), t) } : {}) };
       }
-      return { name: p.name, address: p.address, tokens, note: p.note || null, ...(Object.keys(lim).length ? { limits: lim } : {}) };
+      return { name: p.name, address: p.address, tokens, note: p.note || null, ...(p.expiresAt ? { expiresAt: p.expiresAt } : {}), ...(Object.keys(lim).length ? { limits: lim } : {}) };
     }),
     note: "Only the owner can change rules or payees, and only in their own terminal. Payments that need approval wait for `reinpay approve`.",
   };
@@ -221,7 +237,7 @@ export async function walletStatus() {
 }
 
 // ---- payees (owner only, from the CLI) ----
-export async function addPayee({ name, address, tokens, note, maxPerPayment, allowLookalike = false }) {
+export async function addPayee({ name, address, tokens, note, maxPerPayment, allowLookalike = false, untilMs = null }) {
   syncTokens();
   if (tokens) for (const t of tokens) if (!TOKENS[t]) throw new Error(`Unknown token "${t}". Reinpay spends ${Object.keys(TOKENS).join(", ")}; add others with reinpay token add.`);
   if (!/^[\w .'-]{2,40}$/.test(String(name || ""))) throw new Error("Payee name: 2-40 letters, digits, spaces, dots, dashes or apostrophes.");
@@ -238,7 +254,7 @@ export async function addPayee({ name, address, tokens, note, maxPerPayment, all
   const code = await publicClient().getCode({ address: a }).catch(() => null);
   const tok = code && code !== "0x" ? await tokenAt(a) : null;
   if (tok) throw new Error(`${a} is the contract of ${tok}, not a wallet. Tokens sent to a token contract are usually stuck for good. Use the recipient's own address.`);
-  const p = { name, address: a, ...(tokens ? { tokens } : {}), ...(note ? { note } : {}), ...(maxPerPayment ? { maxPerPayment } : {}), isContract: !!code && code !== "0x", ...(like ? { lookalikeConfirmed: like.name } : {}), addedAt: new Date().toISOString() };
+  const p = { name, address: a, ...(tokens ? { tokens } : {}), ...(note ? { note } : {}), ...(maxPerPayment ? { maxPerPayment } : {}), isContract: !!code && code !== "0x", ...(like ? { lookalikeConfirmed: like.name } : {}), ...(untilMs ? { expiresAt: new Date(Date.now() + untilMs).toISOString() } : {}), addedAt: new Date().toISOString() };
   cfg.payees.push(p);
   saveConfig(cfg);
   return p;

@@ -194,7 +194,7 @@ const { StdioClientTransport } = await import("@modelcontextprotocol/sdk/client/
 const mcp = new Client({ name: "reinpay-live-test", version: "0.0.0" });
 await mcp.connect(new StdioClientTransport({ command: process.execPath, args: [fileURLToPath(new URL("../bin/reinpay.js", import.meta.url)), "mcp"], env: { ...process.env, REINPAY_HOME: home } }));
 const names = (await mcp.listTools()).tools.map((t) => t.name).sort();
-check(`the agent gets 6 tools (${names.join(", ")})`, names.join() === "get_receipt,get_rules,list_receipts,request_payment,verify_receipt,wallet_status");
+check(`the agent gets 7 tools (${names.join(", ")})`, names.join() === "freeze_wallet,get_receipt,get_rules,list_receipts,request_payment,verify_receipt,wallet_status");
 check("no tool can approve, reject or change rules or payees", !names.some((n) => /approve|reject|rule_set|payee|unlock|autosend/.test(n)));
 const call = async (name, args = {}) => { const r = await mcp.callTool({ name, arguments: args }); return { err: !!r.isError, text: r.content.map((x) => x.text).join("") }; };
 const rules = JSON.parse((await call("get_rules")).text);
@@ -213,6 +213,11 @@ const one2 = JSON.parse((await call("get_receipt", { id: r1.id })).text);
 check("get_receipt shows the history of an approval that was refused", one2.history.some((h) => /Approval refused/.test(h.note)));
 const mv = JSON.parse((await call("verify_receipt", { id: r1.id })).text);
 check("verify_receipt over MCP: a receipt that was never sent has nothing to check", mv.ok === false && /nothing was sent/.test(mv.reason));
+const fzr = JSON.parse((await call("freeze_wallet", { reason: "live test: the agent pulls the brake" })).text);
+check("freeze_wallet over MCP: the agent can pull the brake", fzr.frozen?.by === "agent");
+const afterFz = JSON.parse((await call("request_payment", { payee: "Test payee", amount: "0.0001", token: "ETH", memo: "after freeze" })).text);
+check("after the agent froze it, its own next request is blocked as frozen", afterFz.status === "blocked" && afterFz.rule === "frozen");
+check("no MCP tool can unfreeze", !names.some((n) => /unfreeze/.test(n)));
 await mcp.close();
 
 // ---- 0.6: verify real public payments, doctor against the real RPC, lookalike guard ----
@@ -238,7 +243,7 @@ check("verify: that real token transfer matches a receipt written from it", v1.o
 check("verify: the same transaction with a different payee does not match", !(await V.verifyReceipt({ ...real, payeeAddress: OTHER })).ok);
 check("verify: one unit more than was paid does not match", !(await V.verifyReceipt({ ...real, amountRaw: (BigInt(real.amountRaw) + 1n).toString() })).ok);
 check("verify: another wallet as the sender does not match", !(await V.verifyReceipt({ ...real, wallet: OTHER })).ok);
-check("verify: another token contract does not match", !(await V.verifyReceipt({ ...real, tokenAddress: U })).ok);
+check("verify: another token contract does not match", !(await V.verifyReceipt({ ...real, tokenAddress: getAddress(real.tokenAddress) === U ? OTHER : U })).ok);
 check("verify: called ETH instead of the token does not match", !(await V.verifyReceipt({ ...real, token: "ETH" })).ok);
 if (ethTx) {
   const erc = await c.getTransactionReceipt({ hash: ethTx.hash });
@@ -254,13 +259,15 @@ const dr = await D.doctor();
 const dget = (n) => dr.find((x) => x.name === n);
 check("doctor: the real RPC answers and is chain 4663", dget("rpc").level === "ok" && dget("chain").level === "ok", dget("rpc").detail);
 check("doctor: reads the gas price and the (pretend 1 ETH) balance", dget("gas money").level === "ok", dget("gas money").detail);
-check("doctor: 9 checks", dr.length === 9, dr.map((x) => `${x.name}:${x.level}`).join(" "));
+check("doctor: 10 checks", dr.length === 10, dr.map((x) => `${x.name}:${x.level}`).join(" "));
 
 const FAKE_DEAD = "0x0000" + "1".repeat(32) + "dead";
 let le = null; try { await P.addPayee({ name: "Lookalike", address: FAKE_DEAD }); } catch (e) { le = e; }
 check("payee add refuses an address that starts and ends like the burn address payee", le?.code === "LOOKALIKE");
 const lp = await P.addPayee({ name: "Lookalike", address: FAKE_DEAD, allowLookalike: true });
 check("after the owner confirms, it is added and marked as confirmed", lp.lookalikeConfirmed === "Test payee");
+check("doctor: the brakes line shows the freeze the agent made", dr.find((x) => x.name === "brakes").level === "warn" && /agent/.test(dr.find((x) => x.name === "brakes").detail));
+(await import("../src/freeze.js")).unfreeze();
 check("doctor: shows the confirmed lookalike as something to look at", (await D.doctor()).find((x) => x.name === "payees").level === "warn");
 
 console.log(`\n${pass} passed, ${fail} failed. Nothing was signed or sent.`);

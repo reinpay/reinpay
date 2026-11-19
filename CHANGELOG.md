@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.7.0 (unreleased): brakes
+
+- `reinpay freeze [reason]`: one command stops every payment. Requests are blocked with the rule `frozen`, autosend stops even for a payment already decided, and `reinpay approve` refuses. `reinpay unfreeze` is terminal only and asks whether you checked your receipts. The state is kept in `frozen.json`, apart from the sealed config; an unreadable file counts as frozen.
+- Circuit breaker: when the agent is blocked 5 times within 10 minutes, Reinpay freezes itself and notifies the owner (Telegram or webhook, event `frozen`). `reinpay rule breaker <count> <minutes>` or `off`. Requests blocked by the freeze itself, waiting payments and the owner's own test requests do not count.
+- New MCP tool `freeze_wallet`: the agent can pull the brake if it notices it is being told to pay someone it should not. No tool can unfreeze.
+- Expiring payees: `reinpay payee add ... --until=30d`, and `reinpay payee until <name> <30d|12h|90m|off>`. An expired payee is blocked (rule `payee expired`) and no longer shown to the agent.
+- `reinpay doctor` has a tenth check, brakes; `reinpay status` and `get_rules` show the freeze and the breaker.
+- Tests: 29 freeze/breaker/expiry checks offline and 2 more doctor checks, plus 4 new live mainnet checks. All passing. Nothing is signed or sent.
+
 ## 0.6.0 (unreleased): check it
 
 - `reinpay verify <RP-id>` (and `--all`) reads a sent payment back from Robinhood Chain and checks it against its receipt: on chain 4663, confirmed and succeeded, the same block, sent from your wallet, one transfer out to the payee, the exact amount of the right token, no ETH sent along with a token call. Each check says what it compared. New MCP tool `verify_receipt`, so an agent can check a payment before telling you it arrived.
