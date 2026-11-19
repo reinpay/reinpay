@@ -172,6 +172,16 @@ cfg.rules.autoSend = false; C.saveConfig(cfg);
   writeFileSync(rp, JSON.stringify(db));
   const ap2 = await P.approve(w.id, { passphrase: "throwaway-test-passphrase" });
   check("a receipt edited to point at another address is refused at approval, nothing signed", ap2.status === "blocked" && ap2.rule === "payee list" && !ap2.txHash, ap2.reason);
+  // 0.5.0: a config changed outside reinpay is never signed, even when every other check passes
+  const w2 = await rq("Test payee", "0.0012", "ETH", "seal test");
+  const ap3 = await P.approve(w2.id, { passphrase: "throwaway-test-passphrase" });
+  check("approval stops before signing when config.json is not sealed by the wallet key", ap3.rule === "config seal" && !ap3.txHash && ap3.status === "needs_approval", ap3.reason);
+  const { sealConfig, checkSeal } = await import("../src/seal.js");
+  const sealed = await sealConfig(C.loadConfig(), K.loadAccount("throwaway-test-passphrase")); C.saveConfig(sealed);
+  check("after the owner seals, the seal verifies against the wallet", (await checkSeal(C.loadConfig(), me)).ok === true);
+  const c5 = C.loadConfig(); c5.payees.push({ name: "Sneaky", address: "0x000000000000000000000000000000000000bEEF" }); C.saveConfig(c5);
+  check("a payee slipped into config.json by hand breaks the seal", (await checkSeal(C.loadConfig(), me)).ok === false);
+  P.reject(w2.id, "Test cleanup.");
   cT.rules.daily.ETH = "0.005"; C.saveConfig(cT);
 }
 let threw = "";

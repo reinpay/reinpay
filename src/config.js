@@ -18,6 +18,7 @@ export const paths = () => ({
   dir: HOME(),
   keystore: join(HOME(), "keystore.json"),
   passphrase: join(HOME(), "passphrase"),
+  unlock: join(HOME(), "unlock.json"),
   config: join(HOME(), "config.json"),
   receipts: join(HOME(), "receipts.json"),
 });

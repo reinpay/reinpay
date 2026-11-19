@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.0 (unreleased): hardening
+
+- Config seal: every change made with the owner's terminal commands (`rule`, `payee`, `token`, `notify`, `autosend`, and `init`) is signed with the wallet's own key. Before anything is signed, `reinpay approve` and autosend check that signature. If `config.json` was edited any other way (an agent with file access adding itself as a payee, raising a budget, turning autosend on), nothing is signed until the owner checks `reinpay rules` and runs `reinpay seal`. Existing wallets: run `reinpay seal` once after updating.
+- Unlock that expires: `reinpay unlock --for=30m` (also `2h`, `1d`; `0` keeps it until `reinpay lock`). The default is 12 hours. When the time is up the passphrase file is removed and signing needs the passphrase again.
+- `reinpay status` shows the seal and how long the wallet stays unlocked.
+- Tests: 55 rule, 7 lock, 9 report, 11 notification, 10 CSV, 9 profile and 15 seal/unlock checks offline, and 59 live mainnet checks. All passing. Nothing is signed or sent.
+
 ## 0.4.1 (unreleased): security fix
 
 - Fixed: `reinpay approve` signed the raw transaction stored in `receipts.json`, while the second simulation used a transaction built fresh from the payee list and the amount. Anything able to edit `receipts.json` could have made the owner approve one payment and sign another. Approve now builds the transaction from the payee list and the amount, simulates exactly that transaction, and signs exactly that transaction. Raw transactions are no longer written to `receipts.json` at all, and a receipt whose payee address is not on the payee list is refused. Reported publicly; thank you.

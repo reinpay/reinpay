@@ -11,6 +11,7 @@ import { simulate, mismatch } from "./simulate.js";
 import { walletAddress, loadAccount, isUnlocked } from "./keystore.js";
 import { withLock } from "./lock.js";
 import { notifyOwner } from "./notify.js";
+import { checkSeal } from "./seal.js";
 
 const FEE_MARGIN = 12n; // tenths: 1.2x the simulated gas
 
@@ -119,7 +120,11 @@ export async function requestPayment({ payee, amount, token = "USDG", memo = "" 
     if (status === "sending") rec._tx = ch.tx; // kept in memory only, never written to disk
     return rec;
   });
-  if (r.status === "sending") return view(await sendNow(r, r._tx, loadAccount()));
+  if (r.status === "sending") {
+    const sc = await checkSeal(loadConfig(), from);
+    if (!sc.ok) return view(updateReceipt(r.id, { status: "needs_approval", rule: "config seal", reason: `Not sent: ${sc.reason}. The owner checks the rules and runs reinpay seal.` }, "Autosend stopped: config not sealed."));
+    return view(await sendNow(r, r._tx, loadAccount()));
+  }
   if (["needs_approval", "ready"].includes(r.status) && cfg.notify) {
     const n = await notifyOwner(r, { cfg });
     return view(updateReceipt(r.id, {}, n.ok ? `Owner notified (${n.detail}).` : `Owner notification failed (${n.detail}).`));
@@ -146,6 +151,8 @@ export async function approve(id, { passphrase } = {}) {
     // Build the transaction fresh from the payee list and the amount, simulate exactly that, and sign exactly that.
     const ch = await check(r.wallet, r.token, getAddress(p.address), BigInt(r.amountRaw));
     if (ch.problem) return { final: updateReceipt(r.id, { status: "blocked", rule: "simulation", reason: `Simulated again: ${ch.problem}.` }, "Approval refused by the second simulation.") };
+    const sc = await checkSeal(cfg, r.wallet);
+    if (!sc.ok) return { final: updateReceipt(r.id, { rule: "config seal", reason: `Not signed: ${sc.reason}. Check reinpay rules, then run reinpay seal and approve again.` }, "Approval stopped: config not sealed.") };
     return { go: updateReceipt(r.id, { status: "sending", simulation: simView(ch.sim, ch.feeWei) }, "Approved by the owner; simulated again."), tx: ch.tx };
   });
   if (done.final) return view(done.final);
@@ -202,6 +209,8 @@ export function rulesView(now = Date.now()) {
     note: "Only the owner can change rules or payees, and only in their own terminal. Payments that need approval wait for `reinpay approve`.",
   };
 }
+
+export async function sealStatus() { return checkSeal(loadConfig(), walletAddress()); }
 
 export async function walletStatus() {
   const a = requireWallet();

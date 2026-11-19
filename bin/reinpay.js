@@ -18,7 +18,8 @@ const HELP = `reinpay ${pkg.version} - a wallet for AI agents that only spends i
   reinpay init [--import]                  Create (or import) the encrypted wallet. Terminal only.
   reinpay address                          Print the wallet address
   reinpay status                           Balances, budgets left today and the rules
-  reinpay unlock | lock                    Store or remove the passphrase file the server signs with
+  reinpay unlock [--for=12h] | lock        Store (for a while) or remove the passphrase file the server signs with
+  reinpay seal                             Check your rules, then seal them with your wallet key
   reinpay rules                            Show the rules
   reinpay rule <name> <token> <amount>     Set daily | weekly | monthly | max | approve-above for a token, e.g. reinpay rule daily USDG 50
                                            (weekly and monthly accept "off"; weeks start on Monday, local time)
@@ -99,14 +100,28 @@ async function main() {
     const b = await ask("Repeat passphrase: ", { hidden: true });
     if (a !== b) { console.error("The passphrases differ. Nothing was written."); process.exit(1); }
     const addr = K.writeKeystore(pk, a);
+    await reseal(a);
     console.log(`Wallet created: ${addr}\nKeystore: ${C.paths().keystore}\nNext: add a payee (reinpay payee add), check the rules (reinpay rules), then fund the wallet with a small amount.`);
     return;
   }
   if (cmd === "address") return console.log(K.walletAddress() ?? "No wallet yet. Run reinpay init.");
-  if (cmd === "unlock") { requireTTY("unlock"); K.unlock(await ask("Passphrase (hidden): ", { hidden: true })); return console.log("Unlocked. The MCP server can now sign payments that are inside your rules (if autosend is on) or that you approve."); }
+  if (cmd === "unlock") {
+    requireTTY("unlock");
+    const f = opt("for") ?? "12h", m = /^(\d+)(m|h|d)?$/.exec(f);
+    if (!m) throw new Error("Usage: reinpay unlock [--for=30m|2h|1d|0]  (0 keeps it unlocked until reinpay lock)");
+    const ms = Number(m[1]) * ({ m: 60_000, h: 3_600_000, d: 86_400_000 }[m[2] || "m"]);
+    K.unlock(await ask("Passphrase (hidden): ", { hidden: true }), ms);
+    return console.log(`Unlocked${ms ? ` until ${new Date(Date.now() + ms).toLocaleString()}` : " until you run reinpay lock"}. The MCP server can now sign payments you approve, and those inside your rules if autosend is on.`);
+  }
+  if (cmd === "seal") {
+    requireTTY("seal");
+    console.log(JSON.stringify(P.rulesView(), null, 2));
+    if ((await ask("Seal these rules and payees with your wallet key? Type yes: ")).trim().toLowerCase() !== "yes") return console.log("Not sealed.");
+    return reseal();
+  }
   if (cmd === "lock") { K.lock(); return console.log("Locked. The passphrase file is removed."); }
   if (cmd === "export") { requireTTY("export"); console.log(K.exportKey(await ask("Passphrase (hidden): ", { hidden: true }))); return; }
-  if (cmd === "status") return console.log(JSON.stringify(await P.walletStatus(), null, 2));
+  if (cmd === "status") { const st = await P.walletStatus(); st.configSeal = await P.sealStatus(); st.unlockedUntil = K.isUnlocked() ? (K.unlockedUntil() ? new Date(K.unlockedUntil()).toISOString() : "until reinpay lock") : null; return console.log(JSON.stringify(st, null, 2)); }
   if (cmd === "rules") return console.log(JSON.stringify(P.rulesView(), null, 2));
 
   if (cmd === "rule") {
@@ -216,4 +231,13 @@ async function main() {
   process.exit(1);
 }
 
-main().catch((e) => { console.error(e?.shortMessage || e?.message || e); process.exit(1); });
+// Commands that change rules, payees, tokens or notifications seal the config with the wallet key afterwards.
+const MUTATING = ["rule", "autosend"].includes(cmd) || (cmd === "notify" && pos[0] !== "test") || (cmd === "payee" && ["add", "remove", "off", "on", "limit"].includes(pos[0])) || (cmd === "token" && ["add", "remove"].includes(pos[0]));
+async function reseal(passphrase) {
+  const K = await import("../src/keystore.js"), C = await import("../src/config.js"), { sealConfig } = await import("../src/seal.js");
+  const pass = passphrase ?? (K.isUnlocked() ? undefined : await ask("Passphrase to seal your rules (hidden): ", { hidden: true }));
+  const sealed = await sealConfig(C.loadConfig(), K.loadAccount(pass));
+  C.saveConfig(sealed);
+  console.log(`Rules sealed with your wallet key (${sealed.seal.at}).`);
+}
+main().then(() => (MUTATING ? reseal() : null)).catch((e) => { console.error(e?.shortMessage || e?.message || e); process.exit(1); });

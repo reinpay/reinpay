@@ -45,12 +45,31 @@ function decrypt(passphrase) {
 /** Signing account. Uses the passphrase given, or the unlock file written by `reinpay unlock`. */
 export function loadAccount(passphrase) {
   if (!keystoreExists()) throw new Error("No Reinpay wallet yet. Run `reinpay init` in your own terminal.");
-  const pass = passphrase ?? (existsSync(paths().passphrase) ? readFileSync(paths().passphrase, "utf8").trimEnd() : null);
+  const pass = passphrase ?? (isUnlocked() ? readFileSync(paths().passphrase, "utf8").trimEnd() : null);
   if (pass == null) throw new Error("The wallet is locked. Run `reinpay unlock` in your own terminal to let the server sign.");
   return privateKeyToAccount(decrypt(pass));
 }
 
-export const isUnlocked = () => existsSync(paths().passphrase);
-export function unlock(passphrase) { decrypt(passphrase); writePrivate(paths().passphrase, passphrase); }
-export function lock() { if (isUnlocked()) unlinkSync(paths().passphrase); }
+/** Unlocked means the passphrase file exists and its time has not run out. An expired unlock locks itself. */
+export function unlockedUntil() {
+  if (!existsSync(paths().passphrase)) return null;
+  let until = 0;
+  try { until = Number(JSON.parse(readFileSync(paths().unlock, "utf8")).until) || 0; } catch { until = 0; }
+  return until;
+}
+export function isUnlocked(now = Date.now()) {
+  const u = unlockedUntil();
+  if (u === null) return false;
+  if (u > 0 && now >= u) { lock(); return false; }
+  return true;
+}
+/** ms: how long the unlock lasts (0 = until reinpay lock). */
+export function unlock(passphrase, ms = 0) {
+  decrypt(passphrase);
+  writePrivate(paths().passphrase, passphrase);
+  writePrivate(paths().unlock, JSON.stringify({ until: ms > 0 ? Date.now() + ms : 0 }) + "\n");
+}
+export function lock() {
+  for (const p of [paths().passphrase, paths().unlock]) if (existsSync(p)) unlinkSync(p);
+}
 export const exportKey = (passphrase) => decrypt(passphrase);

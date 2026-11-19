@@ -1,6 +1,6 @@
 {
   "name": "reinpay",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "description": "A wallet for AI agents that only spends inside your rules: daily budgets, a payee list, per-payment caps and an approval line. Every payment is simulated on Robinhood Chain mainnet before it is sent. MCP server included.",
   "type": "module",
   "bin": {
@@ -18,7 +18,7 @@
     "node": ">=22.12.0"
   },
   "scripts": {
-    "test": "node test/rules.test.mjs && node test/lock.test.mjs && node test/report.test.mjs && node test/notify.test.mjs && node test/csv.test.mjs && node test/profile.test.mjs && node test/live.mjs"
+    "test": "node test/rules.test.mjs && node test/lock.test.mjs && node test/report.test.mjs && node test/notify.test.mjs && node test/csv.test.mjs && node test/profile.test.mjs && node test/seal.test.mjs && node test/live.mjs"
   },
   "keywords": [
     "mcp",
