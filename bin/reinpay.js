@@ -18,15 +18,20 @@ const HELP = `reinpay ${pkg.version} - a wallet for AI agents that only spends i
   reinpay status                           Balances, budgets left today and the rules
   reinpay unlock | lock                    Store or remove the passphrase file the server signs with
   reinpay rules                            Show the rules
-  reinpay rule <name> <token> <amount>     Set daily | max | approve-above for USDG or ETH, e.g. reinpay rule daily USDG 50
+  reinpay rule <name> <token> <amount>     Set daily | weekly | monthly | max | approve-above for USDG or ETH, e.g. reinpay rule daily USDG 50
+                                           (weekly and monthly accept "off"; weeks start on Monday, local time)
   reinpay rule repeat-guard <minutes>      Hold repeats of the same payment for that long (0 turns it off)
   reinpay autosend <on|off>                Send payments that are inside every rule without asking (needs unlock)
   reinpay payee add <name> <0xaddress> [--tokens=USDG,ETH] [--note=...]
   reinpay payee list | remove <name> | off <name> | on <name>
+  reinpay payee limit <name> <daily|max> <USDG|ETH> <amount|off>   A payee's own daily budget or max per payment
   reinpay pending                          Payments waiting for you
   reinpay approve <RP-id>                  Check the rules again, simulate again, then sign and send
   reinpay reject <RP-id>                   Refuse a waiting payment
   reinpay receipts [--status=sent] [--json]
+  reinpay notify telegram <bot-token> <chat-id> | webhook <https-url> | off | test
+                                           Tell you when a payment waits for your approval
+  reinpay report [--days=7] [--json]       What was sent, waiting and blocked, per day, with top payees
   reinpay export                           Show the private key. Terminal only.
   reinpay --version`;
 
@@ -96,10 +101,12 @@ async function main() {
       const m = Number(a1); if (!(m >= 0 && m <= 1440)) throw new Error("Minutes between 0 and 1440.");
       cfg.rules.repeatGuardMinutes = m;
     } else {
-      const key = { daily: "daily", max: "maxPerPayment", "approve-above": "approveAbove" }[name];
+      const key = { daily: "daily", weekly: "weekly", monthly: "monthly", max: "maxPerPayment", "approve-above": "approveAbove" }[name];
       const tok = String(a1 || "").toUpperCase();
-      if (!key || !["USDG", "ETH"].includes(tok) || !/^\d+(\.\d+)?$/.test(String(a2 || ""))) throw new Error("Usage: reinpay rule <daily|max|approve-above> <USDG|ETH> <amount>");
-      cfg.rules[key] = { ...(cfg.rules[key] || {}), [tok]: a2 };
+      const off = ["weekly", "monthly"].includes(name) && String(a2).toLowerCase() === "off";
+      if (!key || !["USDG", "ETH"].includes(tok) || (!off && !/^\d+(\.\d+)?$/.test(String(a2 || "")))) throw new Error("Usage: reinpay rule <daily|weekly|monthly|max|approve-above> <USDG|ETH> <amount> (weekly and monthly also take off)");
+      if (off) { cfg.rules[key] = { ...(cfg.rules[key] || {}) }; delete cfg.rules[key][tok]; }
+      else cfg.rules[key] = { ...(cfg.rules[key] || {}), [tok]: a2 };
     }
     C.saveConfig(cfg);
     return console.log(JSON.stringify(P.rulesView(), null, 2));
@@ -121,7 +128,12 @@ async function main() {
     }
     if (sub === "remove") return console.log(`Removed ${P.removePayee(name).name}.`);
     if (sub === "off" || sub === "on") return console.log(`${P.setPayee(name, { disabled: sub === "off" }).name} is ${sub}.`);
-    throw new Error("Usage: reinpay payee <add|list|remove|off|on>");
+    if (sub === "limit") {
+      const [, , kind, tok, amount] = pos;
+      const p = P.setPayeeLimit(name, kind, tok, amount);
+      return console.log(`${p.name}: daily ${JSON.stringify(p.daily || {})}, max per payment ${JSON.stringify(p.maxPerPayment || {})}.`);
+    }
+    throw new Error("Usage: reinpay payee <add|list|remove|off|on|limit>");
   }
   if (cmd === "pending") {
     const list = [...P.listReceipts({ status: "needs_approval", limit: 200 }), ...P.listReceipts({ status: "ready", limit: 200 })];
@@ -138,6 +150,26 @@ async function main() {
     return console.log(line(await P.approve(id, { passphrase: pass })));
   }
   if (cmd === "reject") { requireTTY("reject"); return console.log(line(P.reject(pos[0]))); }
+  if (cmd === "notify") {
+    requireTTY("notify");
+    const { parseNotify, notifyOwner } = await import("../src/notify.js");
+    const cfg = C.loadConfig();
+    if (pos[0] === "test") {
+      if (!cfg.notify) throw new Error("Notifications are off. Set them up first: reinpay notify telegram <bot-token> <chat-id>");
+      const n = await notifyOwner({ id: "RP-TEST", amount: "1", token: "USDG", payee: "Test", memo: "test message", rule: "test", reason: "This is a test from reinpay notify test.", status: "needs_approval" }, { cfg });
+      return console.log(n.ok ? `Sent (${n.detail}).` : `Not sent: ${n.detail}`);
+    }
+    const n = parseNotify(pos[0], pos[1], pos[2]);
+    if (n) cfg.notify = n; else delete cfg.notify;
+    C.saveConfig(cfg);
+    return console.log(n ? `Notifications on (${n.type}). Run reinpay notify test to check.` : "Notifications off.");
+  }
+  if (cmd === "report") {
+    const { spendingReport, reportText } = await import("../src/report.js");
+    const { allReceipts } = await import("../src/receipts.js");
+    const rep = spendingReport(allReceipts(), { days: opt("days") || 7 });
+    return console.log(flags.has("--json") ? JSON.stringify(rep, null, 2) : reportText(rep));
+  }
   if (cmd === "receipts") {
     const list = P.listReceipts({ status: opt("status"), limit: 200 });
     return console.log(flags.has("--json") ? JSON.stringify(list, null, 2) : list.length ? list.map(line).join("\n") : "No receipts yet.");

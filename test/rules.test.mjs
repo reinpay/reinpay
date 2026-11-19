@@ -1,5 +1,5 @@
 // The rules engine, offline: every rule, its order, and the arithmetic in base units. No network, no files.
-import { decide, parseAmount, findPayee, totals, localDay } from "../src/rules.js";
+import { decide, parseAmount, findPayee, totals, localDay, localWeek, localMonth } from "../src/rules.js";
 
 let pass = 0, fail = 0;
 const check = (label, cond, info = "") => { cond ? pass++ : fail++; console.log(`${cond ? "PASS" : "FAIL"} ${label}${info ? ` (${info})` : ""}`); };
@@ -58,6 +58,47 @@ const t = totals([...spent, rec(P, "USDG", usdg("3"), "ready")], "USDG", now);
 check("totals: sent 40, waiting 3", t.spent === usdg("40") && t.held === usdg("3"));
 check("localDay uses the local calendar", localDay(now) === "2026-11-18");
 check("bad rule values are refused, not guessed", throws(() => run(req("Weather API", "USDG", usdg("1")), [], { ...rules, daily: { USDG: "fifty" } }), /plain decimal/));
+
+// 0.2.0: a payee's own daily budget, on top of the wallet's
+{
+  const W = { name: "Weather API", address: A, daily: { USDG: "10" } };
+  const r2 = (amountRaw) => ({ payee: W, token: "USDG", amountRaw });
+  const noGuard = { ...rules, repeatGuardMinutes: 0 };
+  check("payee daily budget: 6 of 10 fine when nothing was paid today", run(r2(usdg("6")), [], noGuard).status === "allowed");
+  const today = [rec(W, "USDG", usdg("6"), "sent")];
+  check("payee daily budget: 6 sent + 5 asked > 10 is blocked by the payee rule", run(r2(usdg("5")), today, noGuard).rule === "payee daily budget");
+  check("payee daily budget: 6 sent + 4 asked = 10 is fine", run(r2(usdg("4")), today, noGuard).status === "allowed");
+  check("payee daily budget counts payments still waiting", run(r2(usdg("5")), [rec(W, "USDG", usdg("6"), "needs_approval")], noGuard).rule === "payee daily budget");
+  check("payee daily budget ignores other payees", run(r2(usdg("9")), [rec({ address: B }, "USDG", usdg("9"), "sent")], noGuard).status === "allowed");
+  check("payee daily budget ignores yesterday", run(r2(usdg("9")), [rec(W, "USDG", usdg("9"), "sent", now - 26 * 3_600_000)], noGuard).status === "allowed");
+  check("payee daily budget does not touch the other token", run({ payee: W, token: "ETH", amountRaw: eth("0.001") }, today, noGuard).status === "allowed");
+  check("the wallet's daily budget still decides first", run(r2(usdg("5")), [rec({ address: B }, "USDG", usdg("48"), "sent")], noGuard).rule === "daily budget");
+  const m = run(r2(usdg("5")), today, noGuard);
+  check("the reason says how much is left for that payee", /Only 4 USDG of Weather API's daily 10 USDG/.test(m.reason), m.reason);
+  check("totals for one payee only", totals([...today, rec({ address: B }, "USDG", usdg("9"), "sent")], "USDG", now, A).spent === usdg("6"));
+}
+
+// 0.3.0: weekly and monthly budgets (local calendar; weeks start on Monday)
+{
+  const Wk = { ...rules, repeatGuardMinutes: 0, weekly: { USDG: "60" }, monthly: { USDG: "100" } };
+  const P0 = payees[0];
+  const day = (d, h = 12) => new Date(2026, 10, d, h, 0, 0).getTime(); // November 2026; the 18th is a Wednesday
+  check("localWeek: Wednesday 18 Nov 2026 is in the week of Monday 16 Nov", localWeek(now) === "2026-11-16");
+  check("localWeek: Sunday 22 Nov still belongs to the week of the 16th; Monday 23 starts a new one", localWeek(day(22, 23)) === "2026-11-16" && localWeek(day(23, 0)) === "2026-11-23");
+  check("localWeek across a month end: Tue 1 Dec 2026 is in the week of Mon 30 Nov", localWeek(new Date(2026, 11, 1, 9).getTime()) === "2026-11-30");
+  check("localMonth", localMonth(now) === "2026-11");
+  const thisWeek = [rec(P0, "USDG", usdg("20"), "sent", day(16)), rec(P0, "USDG", usdg("20"), "sent", day(17)), rec(P0, "USDG", usdg("15"), "needs_approval", day(18, 9))];
+  check("weekly: 55 used this week + 6 > 60 is blocked by the weekly budget", run(req("Weather API", "USDG", usdg("6")), thisWeek, Wk).rule === "weekly budget");
+  check("weekly: 55 used + 5 = 60 is fine", run(req("Weather API", "USDG", usdg("5")), thisWeek, Wk).status !== "blocked");
+  check("weekly: last week's payments do not count", run(req("Weather API", "USDG", usdg("6")), [rec(P0, "USDG", usdg("58"), "sent", day(15))], Wk).status !== "blocked");
+  const thisMonth = [rec(P0, "USDG", usdg("50"), "sent", day(2)), rec(P0, "USDG", usdg("45"), "sent", day(9))];
+  check("monthly: 95 this month + 6 > 100 is blocked by the monthly budget", run(req("Weather API", "USDG", usdg("6")), thisMonth, Wk).rule === "monthly budget");
+  check("monthly: October does not count", run(req("Weather API", "USDG", usdg("6")), [rec(P0, "USDG", usdg("99"), "sent", new Date(2026, 9, 30).getTime())], Wk).status !== "blocked");
+  check("daily still decides before weekly", run(req("Weather API", "USDG", usdg("6")), [rec(P0, "USDG", usdg("48"), "sent")], Wk).rule === "daily budget");
+  { const nr = run(req("Weather API", "USDG", usdg("6")), [...thisWeek, ...thisMonth], { ...rules, repeatGuardMinutes: 0 });
+    check("no weekly or monthly rule set means no weekly or monthly limit", !["weekly budget", "monthly budget"].includes(nr.rule) && nr.status !== "blocked", `${nr.status} / ${nr.rule}`); }
+  check("the weekly reason says what is left", /Only 5 USDG of this week's 60 USDG is left/.test(run(req("Weather API", "USDG", usdg("6")), thisWeek, Wk).reason));
+}
 
 console.log(`\n${pass} passed, ${fail} failed.`);
 process.exit(fail ? 1 : 0);

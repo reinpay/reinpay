@@ -39,12 +39,24 @@ export function findPayee(payees, nameOrAddress) {
   return payees.find((p) => p.name.toLowerCase() === q.toLowerCase()) || null;
 }
 
-/** Totals for one token on the local calendar day of `now`. */
-export function totals(receipts, symbol, now) {
-  const day = localDay(now);
+/** The local calendar week (starting Monday) as the date of its Monday, e.g. "2026-11-16". */
+export const localWeek = (ms) => {
+  const d = new Date(ms);
+  d.setHours(12, 0, 0, 0); // midday, so a daylight-saving change cannot move the date
+  d.setDate(d.getDate() - ((d.getDay() + 6) % 7));
+  return localDay(d.getTime());
+};
+export const localMonth = (ms) => localDay(ms).slice(0, 7);
+const PERIOD = { day: localDay, week: localWeek, month: localMonth };
+
+/** Totals for one token in the local day (or week, or month) of `now`, optionally for one payee address only. */
+export function totals(receipts, symbol, now, payeeAddress = null, period = "day") {
+  const key = PERIOD[period];
+  const cur = key(now);
   let spent = 0n, held = 0n;
   for (const r of receipts) {
-    if (r.token !== symbol || localDay(r.createdAt) !== day) continue;
+    if (r.token !== symbol || key(r.createdAt) !== cur) continue;
+    if (payeeAddress && r.payeeAddress !== payeeAddress) continue;
     if (DONE_SPENT.includes(r.status)) spent += BigInt(r.amountRaw);
     else if (OPEN.includes(r.status)) held += BigInt(r.amountRaw);
   }
@@ -76,6 +88,23 @@ export function decide({ rules, receipts, request, now = Date.now(), excludeId =
   if (spent + held + amountRaw > daily) {
     const left = daily > spent + held ? daily - spent - held : 0n;
     return { status: "blocked", rule: "daily budget", reason: `Only ${fmt(left, symbol)} of today's ${fmt(daily, symbol)} is left (sent ${fmt(spent, symbol)}, waiting ${fmt(held, symbol)}).` };
+  }
+  for (const [rk, period, label] of [["weekly", "week", "weekly budget"], ["monthly", "month", "monthly budget"]]) {
+    const cap = limit(rules, rk, symbol);
+    if (cap === null) continue;
+    const t = totals(list, symbol, now, null, period);
+    if (t.spent + t.held + amountRaw > cap) {
+      const left = cap > t.spent + t.held ? cap - t.spent - t.held : 0n;
+      return { status: "blocked", rule: label, reason: `Only ${fmt(left, symbol)} of this ${period}'s ${fmt(cap, symbol)} is left (sent ${fmt(t.spent, symbol)}, waiting ${fmt(t.held, symbol)}).` };
+    }
+  }
+  const pdaily = payee.daily?.[symbol] != null ? parseUnits(String(payee.daily[symbol]), TOKENS[symbol].decimals) : null;
+  if (pdaily !== null) {
+    const t = totals(list, symbol, now, payee.address);
+    if (t.spent + t.held + amountRaw > pdaily) {
+      const left = pdaily > t.spent + t.held ? pdaily - t.spent - t.held : 0n;
+      return { status: "blocked", rule: "payee daily budget", reason: `Only ${fmt(left, symbol)} of ${payee.name}'s daily ${fmt(pdaily, symbol)} is left today (sent ${fmt(t.spent, symbol)}, waiting ${fmt(t.held, symbol)}).` };
+    }
   }
 
   const guard = Number(rules.repeatGuardMinutes || 0);

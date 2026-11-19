@@ -4,9 +4,13 @@ import { encodeFunctionData, erc20Abi, getAddress, isAddress, formatEther, creat
 import { publicClient, robinhoodChain, transport, token as tokenOf, TOKENS, txLink, addrLink, CHAIN_ID } from "./chain.js";
 import { loadConfig, saveConfig } from "./config.js";
 import { decide, findPayee, parseAmount, totals, limit, fmt } from "./rules.js";
+
+const maxZero = (v) => (v > 0n ? v : 0n);
 import { allReceipts, addReceipt, updateReceipt, getReceipt, view } from "./receipts.js";
 import { simulate, mismatch } from "./simulate.js";
 import { walletAddress, loadAccount, isUnlocked } from "./keystore.js";
+import { withLock } from "./lock.js";
+import { notifyOwner } from "./notify.js";
 
 const FEE_MARGIN = 12n; // tenths: 1.2x the simulated gas
 
@@ -47,10 +51,33 @@ async function check(from, symbol, payeeAddress, amountRaw) {
   return { problem: null, tx, sim, feeWei };
 }
 
+/**
+ * Does this address answer like an ERC-20 token (decimals and totalSupply both readable)? Tokens sent to a token's own
+ * contract are almost always stuck for good, so such an address is never a payee. Returns its symbol (or "a token"), or null.
+ */
+const tokenCache = new Map();
+export async function tokenAt(address) {
+  const a = getAddress(address);
+  if (tokenCache.has(a)) return tokenCache.get(a);
+  const c = publicClient();
+  const code = await c.getCode({ address: a }).catch(() => null);
+  let out = null;
+  if (code && code !== "0x") {
+    const [dec, sup, sym] = await Promise.allSettled([
+      c.readContract({ address: a, abi: erc20Abi, functionName: "decimals" }),
+      c.readContract({ address: a, abi: erc20Abi, functionName: "totalSupply" }),
+      c.readContract({ address: a, abi: erc20Abi, functionName: "symbol" }),
+    ]);
+    if (dec.status === "fulfilled" && sup.status === "fulfilled") out = sym.status === "fulfilled" && /^[\x20-\x7e]{1,20}$/.test(sym.value) ? sym.value : "a token";
+  }
+  tokenCache.set(a, out);
+  return out;
+}
+
 const simView = (s, feeWei) => s && { ok: s.ok, block: s.block.toString(), gasUsed: s.gasUsed.toString(), estimatedFeeEth: feeWei != null ? formatEther(feeWei) : null, method: "eth_simulateV1" };
 
-async function sendNow(r, passphrase) {
-  const account = loadAccount(passphrase);
+async function sendNow(r, passphrase, opened) {
+  const account = opened || loadAccount(passphrase);
   if (getAddress(account.address) !== getAddress(r.wallet)) throw new Error("The keystore address changed since this payment was requested. Request it again.");
   updateReceipt(r.id, { status: "sending" }, "Signing and sending.");
   const w = createWalletClient({ account, chain: robinhoodChain, transport: transport() });
@@ -75,34 +102,51 @@ export async function requestPayment({ payee, amount, token = "USDG", memo = "" 
   const symbol = tokenOf(token).symbol;
   const amountRaw = parseAmount(amount, symbol);
   const p = findPayee(cfg.payees, payee);
+  const tokenPayee = p && p.isContract !== false ? await tokenAt(p.address) : null;
   const base = { by, wallet: from, chainId: CHAIN_ID, payee: p ? p.name : String(payee ?? ""), payeeAddress: p ? p.address : null,
     token: symbol, amount: fmt(amountRaw, symbol).split(" ")[0], amountRaw: amountRaw.toString(), memo: String(memo).slice(0, 200) };
-  const d = decide({ rules: cfg.rules, receipts: allReceipts(), request: { payee: p, token: symbol, amountRaw } });
-  if (d.status === "blocked") return view(addReceipt({ ...base, status: "blocked", rule: d.rule, reason: d.reason }));
-
-  const ch = await check(from, symbol, p.address, amountRaw);
-  if (ch.problem) return view(addReceipt({ ...base, status: "blocked", rule: "simulation", reason: `Simulated on mainnet: ${ch.problem}.`, simulation: simView(ch.sim) }));
-  const tx = { to: ch.tx.to, data: ch.tx.data, value: ch.tx.value.toString() };
-  const status = d.status === "needs_approval" ? "needs_approval" : cfg.rules.autoSend && isUnlocked() ? "sending" : "ready";
-  const reason = status === "ready" ? `${d.reason} Waiting for the owner because autoSend is ${cfg.rules.autoSend ? "on but the wallet is locked" : "off"}.` : d.reason;
-  const r = addReceipt({ ...base, status, rule: d.rule, reason, simulation: simView(ch.sim, ch.feeWei), tx });
-  if (status === "sending") return view(await sendNow(r));
+  // Decide, simulate and write the receipt as one step, so a second request cannot spend the same budget in between.
+  // Once the receipt exists it counts against today's budget (waiting or sending), so signing can happen outside the lock.
+  if (tokenPayee) return view(addReceipt({ ...base, status: "blocked", rule: "token contract", reason: `${p.name} (${p.address}) is the contract of ${tokenPayee}. Tokens sent to a token contract are usually stuck for good. Ask the owner to fix this payee.` }));
+  const r = await withLock(async () => {
+    const d = decide({ rules: cfg.rules, receipts: allReceipts(), request: { payee: p, token: symbol, amountRaw } });
+    if (d.status === "blocked") return addReceipt({ ...base, status: "blocked", rule: d.rule, reason: d.reason });
+    const ch = await check(from, symbol, p.address, amountRaw);
+    if (ch.problem) return addReceipt({ ...base, status: "blocked", rule: "simulation", reason: `Simulated on mainnet: ${ch.problem}.`, simulation: simView(ch.sim) });
+    const tx = { to: ch.tx.to, data: ch.tx.data, value: ch.tx.value.toString() };
+    const status = d.status === "needs_approval" ? "needs_approval" : cfg.rules.autoSend && isUnlocked() ? "sending" : "ready";
+    const reason = status === "ready" ? `${d.reason} Waiting for the owner because autoSend is ${cfg.rules.autoSend ? "on but the wallet is locked" : "off"}.` : d.reason;
+    return addReceipt({ ...base, status, rule: d.rule, reason, simulation: simView(ch.sim, ch.feeWei), tx });
+  });
+  if (r.status === "sending") return view(await sendNow(r));
+  if (["needs_approval", "ready"].includes(r.status) && cfg.notify) {
+    const n = await notifyOwner(r, { cfg });
+    return view(updateReceipt(r.id, {}, n.ok ? `Owner notified (${n.detail}).` : `Owner notification failed (${n.detail}).`));
+  }
   return view(r);
 }
 
 /** Owner only (terminal): approve a waiting payment. Rules and the simulation are checked again first. */
 export async function approve(id, { passphrase } = {}) {
-  const r = getReceipt(id);
-  if (!r) throw new Error(`No receipt ${id}.`);
-  if (!["needs_approval", "ready"].includes(r.status)) throw new Error(`${r.id} is ${r.status}; only waiting payments can be approved.`);
-  const cfg = loadConfig();
-  const p = findPayee(cfg.payees, r.payeeAddress);
-  const d = decide({ rules: { ...cfg.rules, repeatGuardMinutes: 0, approveAbove: {} }, receipts: allReceipts(), request: { payee: p, token: r.token, amountRaw: BigInt(r.amountRaw) }, excludeId: r.id });
-  if (d.status === "blocked") return view(updateReceipt(r.id, { status: "blocked", rule: d.rule, reason: d.reason }, `Approval refused: ${d.reason}`));
-  const ch = await check(r.wallet, r.token, r.payeeAddress, BigInt(r.amountRaw));
-  if (ch.problem) return view(updateReceipt(r.id, { status: "blocked", rule: "simulation", reason: `Simulated again: ${ch.problem}.` }, "Approval refused by the second simulation."));
-  updateReceipt(r.id, { simulation: simView(ch.sim, ch.feeWei) }, "Approved by the owner; simulated again.");
-  return view(await sendNow(getReceipt(r.id), passphrase));
+  const pre = getReceipt(id);
+  if (!pre) throw new Error(`No receipt ${id}.`);
+  if (!["needs_approval", "ready"].includes(pre.status)) throw new Error(`${pre.id} is ${pre.status}; only waiting payments can be approved.`);
+  // The account is opened before the lock, so a wrong passphrase fails before anything changes.
+  const account = loadAccount(passphrase);
+  const done = await withLock(async () => {
+    const r = getReceipt(id);
+    if (!r) throw new Error(`No receipt ${id}.`);
+    if (!["needs_approval", "ready"].includes(r.status)) throw new Error(`${r.id} is ${r.status}; only waiting payments can be approved.`);
+    const cfg = loadConfig();
+    const p = findPayee(cfg.payees, r.payeeAddress);
+    const d = decide({ rules: { ...cfg.rules, repeatGuardMinutes: 0, approveAbove: {} }, receipts: allReceipts(), request: { payee: p, token: r.token, amountRaw: BigInt(r.amountRaw) }, excludeId: r.id });
+    if (d.status === "blocked") return { final: updateReceipt(r.id, { status: "blocked", rule: d.rule, reason: d.reason }, `Approval refused: ${d.reason}`) };
+    const ch = await check(r.wallet, r.token, r.payeeAddress, BigInt(r.amountRaw));
+    if (ch.problem) return { final: updateReceipt(r.id, { status: "blocked", rule: "simulation", reason: `Simulated again: ${ch.problem}.` }, "Approval refused by the second simulation.") };
+    return { go: updateReceipt(r.id, { status: "sending", simulation: simView(ch.sim, ch.feeWei) }, "Approved by the owner; simulated again.") };
+  });
+  if (done.final) return view(done.final);
+  return view(await sendNow(done.go, undefined, account));
 }
 
 export function reject(id, why = "Rejected by the owner.") {
@@ -128,12 +172,29 @@ export function rulesView(now = Date.now()) {
       dailyBudget: daily === null ? null : fmt(daily, s), sentToday: fmt(spent, s), waitingToday: fmt(held, s),
       leftToday: daily === null ? null : fmt(daily > spent + held ? daily - spent - held : 0n, s),
       maxPerPayment: cfg.rules.maxPerPayment?.[s] != null ? fmt(limit(cfg.rules, "maxPerPayment", s), s) : null,
+      ...Object.fromEntries([["weekly", "week"], ["monthly", "month"]].flatMap(([k, period]) => {
+        const cap = limit(cfg.rules, k, s);
+        if (cap === null) return [];
+        const t = totals(allReceipts(), s, now, null, period);
+        return [[`${k}Budget`, { budget: fmt(cap, s), sent: fmt(t.spent, s), waiting: fmt(t.held, s), left: fmt(maxZero(cap - t.spent - t.held), s) }]];
+      })),
       ownerApprovesAbove: cfg.rules.approveAbove?.[s] != null ? fmt(limit(cfg.rules, "approveAbove", s), s) : null,
     };
   }
   return {
     tokens: per, repeatGuardMinutes: cfg.rules.repeatGuardMinutes, autoSend: !!cfg.rules.autoSend, walletUnlocked: isUnlocked(),
-    payees: cfg.payees.filter((p) => !p.disabled).map((p) => ({ name: p.name, address: p.address, tokens: p.tokens || Object.keys(TOKENS), note: p.note || null })),
+    ownerNotifiedBy: cfg.notify?.type || null,
+    payees: cfg.payees.filter((p) => !p.disabled).map((p) => {
+      const tokens = p.tokens || Object.keys(TOKENS);
+      const lim = {};
+      for (const t of tokens) {
+        const d = p.daily?.[t], m = p.maxPerPayment?.[t];
+        if (d == null && m == null) continue;
+        const { spent, held } = totals(allReceipts(), t, now, p.address);
+        lim[t] = { ...(m != null ? { maxPerPayment: `${m} ${t}` } : {}), ...(d != null ? { dailyBudget: `${d} ${t}`, leftToday: fmt(maxZero(parseAmount(String(d), t) - spent - held), t) } : {}) };
+      }
+      return { name: p.name, address: p.address, tokens, note: p.note || null, ...(Object.keys(lim).length ? { limits: lim } : {}) };
+    }),
     note: "Only the owner can change rules or payees, and only in their own terminal. Payments that need approval wait for `reinpay approve`.",
   };
 }
@@ -155,6 +216,8 @@ export async function addPayee({ name, address, tokens, note, maxPerPayment }) {
   if (cfg.payees.some((p) => p.name.toLowerCase() === name.toLowerCase())) throw new Error(`A payee named "${name}" already exists.`);
   if (cfg.payees.some((p) => getAddress(p.address) === a)) throw new Error(`${a} is already on the list.`);
   const code = await publicClient().getCode({ address: a }).catch(() => null);
+  const tok = code && code !== "0x" ? await tokenAt(a) : null;
+  if (tok) throw new Error(`${a} is the contract of ${tok}, not a wallet. Tokens sent to a token contract are usually stuck for good. Use the recipient's own address.`);
   const p = { name, address: a, ...(tokens ? { tokens } : {}), ...(note ? { note } : {}), ...(maxPerPayment ? { maxPerPayment } : {}), isContract: !!code && code !== "0x", addedAt: new Date().toISOString() };
   cfg.payees.push(p);
   saveConfig(cfg);
@@ -166,6 +229,25 @@ export function setPayee(name, patch) {
   const p = findPayee(cfg.payees, name);
   if (!p) throw new Error(`No payee "${name}".`);
   Object.assign(p, patch);
+  saveConfig(cfg);
+  return p;
+}
+
+/** Owner only: set or clear a payee's own daily budget or max per payment for one token. amount "off" clears it. */
+export function setPayeeLimit(name, kind, token, amount) {
+  const key = { daily: "daily", max: "maxPerPayment" }[kind];
+  const sym = String(token || "").toUpperCase();
+  if (!key || !TOKENS[sym]) throw new Error("Usage: reinpay payee limit <name> <daily|max> <USDG|ETH> <amount|off>");
+  const cfg = loadConfig();
+  const p = findPayee(cfg.payees, name);
+  if (!p) throw new Error(`No payee "${name}".`);
+  if (p.tokens && !p.tokens.includes(sym)) throw new Error(`${p.name} may only be paid in ${p.tokens.join(" or ")}.`);
+  if (String(amount).toLowerCase() === "off") {
+    if (p[key]) { delete p[key][sym]; if (!Object.keys(p[key]).length) delete p[key]; }
+  } else {
+    parseAmount(amount, sym);
+    p[key] = { ...(p[key] || {}), [sym]: String(amount) };
+  }
   saveConfig(cfg);
   return p;
 }

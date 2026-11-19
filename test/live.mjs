@@ -85,6 +85,49 @@ cfg.rules.daily.ETH = "0.005"; cfg.rules.autoSend = true; C.saveConfig(cfg);
 const r11 = await rq("Test payee", "0.0001");
 check("autosend on but the wallet locked: nothing is sent, the payment waits", r11.status === "ready" && /locked/.test(r11.reason) && !r11.txHash);
 cfg.rules.autoSend = false; C.saveConfig(cfg);
+// 0.2.0: two requests at the same moment cannot both spend the same budget left
+{
+  const before = P.rulesView().tokens.ETH.leftToday;
+  const [ca, cb] = await Promise.all([rq("Test payee", "0.0012", "ETH", "race a"), rq("Test payee", "0.0011", "ETH", "race b")]);
+  const blocked = [ca, cb].filter((x) => x.status === "blocked" && x.rule === "daily budget");
+  check(`two requests at once with ${before} left: one waits, the other is blocked by the daily budget`, blocked.length === 1 && [ca, cb].some((x) => x.status === "needs_approval"), `${ca.status}/${cb.status}`);
+  P.setPayeeLimit("Test payee", "daily", "ETH", "0.004");
+  const pv = P.rulesView().payees.find((x) => x.name === "Test payee");
+  check(`a payee's own daily budget shows in the agent's rules (${JSON.stringify(pv.limits?.ETH)})`, pv.limits?.ETH?.dailyBudget === "0.004 ETH");
+  const pd = await rq("Test payee", "0.0001", "ETH", "payee cap");
+  check("a request over the payee's own daily budget is blocked by that rule", pd.status === "blocked" && pd.rule === "payee daily budget", pd.reason);
+  P.setPayeeLimit("Test payee", "daily", "ETH", "off");
+  check("payee limit off clears it", !P.rulesView().payees.find((x) => x.name === "Test payee").limits);
+  const { spendingReport } = await import("../src/report.js");
+  const { allReceipts } = await import("../src/receipts.js");
+  const rep = spendingReport(allReceipts(), { days: 1 });
+  check(`the report counts today's requests (ETH: ${rep.totals.ETH.waitingCount} waiting, ${rep.totals.ETH.blockedCount} blocked)`, rep.totals.ETH.waitingCount >= 3 && rep.totals.ETH.blockedCount >= 4 && rep.totals.ETH.sentCount === 0);
+}
+// 0.3.0: token contracts are never payees, weekly and monthly budgets, owner notifications
+{
+  const REINPAY_TOKEN = "0x17c4735E9da7F1eeB76d1cC17C2f196F38DE64b3";
+  let e1 = ""; try { await P.addPayee({ name: "Oops token", address: REINPAY_TOKEN }); } catch (e) { e1 = e.message; }
+  check(`adding a token's own contract as a payee is refused (${e1.slice(0, 70)}...)`, /contract of REINPAY/.test(e1));
+  const PONS_FACTORY = "0x7eD598BcEf8bd9Edd8C97A195C6d13f40801EC7e";
+  const pf = await P.addPayee({ name: "A contract that is not a token", address: PONS_FACTORY });
+  check("a contract that is not a token can still be a payee (flagged as a contract)", pf.isContract === true);
+  P.removePayee("A contract that is not a token");
+  const cfg2 = C.loadConfig(); cfg2.payees.push({ name: "Hand edited", address: REINPAY_TOKEN }); C.saveConfig(cfg2);
+  const ht = await rq("Hand edited", "0.0001");
+  check("a token contract slipped into config.json by hand is blocked at payment time", ht.status === "blocked" && ht.rule === "token contract", ht.reason);
+  P.removePayee("Hand edited");
+  const cfg3 = C.loadConfig(); cfg3.rules.weekly = { ETH: "0.0001" }; C.saveConfig(cfg3);
+  const wk = P.rulesView().tokens.ETH.weeklyBudget;
+  check(`get_rules shows the weekly budget and what is left (${JSON.stringify(wk)})`, wk?.budget === "0.0001 ETH" && wk.left === "0 ETH");
+  const wr = await rq("Test payee", "0.0001", "ETH", "weekly");
+  check("over the weekly budget is blocked by that rule", wr.status === "blocked" && wr.rule === "weekly budget");
+  delete cfg3.rules.weekly; cfg3.rules.daily.ETH = "1"; cfg3.notify = { type: "webhook", url: "https://127.0.0.1:9/reinpay-test" }; C.saveConfig(cfg3);
+  const nt = await rq("Test payee", "0.0013", "ETH", "notify test");
+  check(`a waiting payment tries to notify the owner and logs the result on the receipt (${nt.history.at(-1)?.note})`, nt.status === "needs_approval" && /Owner notification failed/.test(nt.history.at(-1)?.note || ""));
+  check("get_rules tells the agent the owner is notified, without the webhook address", P.rulesView().ownerNotifiedBy === "webhook" && !JSON.stringify(P.rulesView()).includes("127.0.0.1"));
+  P.reject(nt.id, "Test cleanup.");
+  delete cfg3.notify; cfg3.rules.daily.ETH = "0.005"; C.saveConfig(cfg3);
+}
 let threw = "";
 try { await P.approve(r8.id); } catch (e) { threw = e.message; }
 check("a blocked payment cannot be approved", /only waiting payments/.test(threw));

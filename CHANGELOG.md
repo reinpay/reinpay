@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.3.0 (unreleased)
+
+- Token contracts are never payees. `reinpay payee add` refuses any address that answers like an ERC-20 token (its `decimals` and `totalSupply` can be read), because tokens sent to a token's own contract are almost always stuck for good. A token contract added to `config.json` by hand is blocked at payment time with the rule `token contract`. Contracts that are not tokens can still be payees and are flagged as contracts.
+- Weekly and monthly budgets: `reinpay rule weekly USDG 100`, `reinpay rule monthly USDG 300` (`off` removes them). Local calendar weeks start on Monday. They are checked after the daily budget, counting payments sent and still waiting, and `get_rules` shows what is left.
+- Owner notifications: `reinpay notify telegram <bot-token> <chat-id>` or `reinpay notify webhook <https-url>`, then `reinpay notify test`. When a payment waits for approval, the owner gets the id, amount, payee, the rule that held it and the command to approve or reject. The agent's memo is shortened and quoted. A failed notification never changes the payment; the result is written on the receipt. The bot token and webhook stay in `config.json` and are never shown to the agent.
+- Tests: 55 offline rule checks, 7 lock, 9 report and 11 notification checks, and 42 live mainnet checks. All passing. Nothing is signed or sent.
+
+## 0.2.0 (unreleased)
+
+- Spend lock: deciding a payment (rules, mainnet simulation, receipt) now runs one at a time across every Reinpay process on the computer, so two requests at the same moment can no longer both spend the same budget left. The same lock covers `reinpay approve`. A lock left by a process that exited is cleared automatically.
+- Per-payee daily budget: `reinpay payee limit <name> daily <USDG|ETH> <amount>` caps what one payee can receive per local day, on top of the wallet's daily budget. `reinpay payee limit <name> max ...` sets the payee's own max per payment from the terminal. `off` clears either. The agent sees each payee's limits and what is left today in `get_rules`.
+- `reinpay report [--days=7] [--json]`: what was sent, what is waiting and what was blocked, per day and token, the top payees per token and the rules that blocked the most. Read from local receipts only.
+- `reinpay approve` checks that the payment is still waiting and opens the wallet before taking the lock, so a wrong passphrase changes nothing.
+- Tests: 43 offline rule checks, 7 lock checks (including two processes), 9 report checks, and 35 live mainnet checks, including two simultaneous requests against one budget. All passing. Nothing is signed or sent.
+
 ## 0.1.0 (unreleased)
 
 First version: a wallet for AI agents that only spends inside the owner's rules, on Robinhood Chain mainnet (chain id 4663).
