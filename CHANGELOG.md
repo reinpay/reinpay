@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.11.0 (unreleased): smarter rules
+
+- Category budgets: `reinpay payee category <payee> <name|off>` and `reinpay rule category <name> daily <token> <amount|off>`. Every payee in a category shares that daily budget, on top of the overall one (rule `category budget`). Receipts store the category, `reinpay report` adds a By category section, shared payee lists carry it, and `get_rules` shows it.
+- Payment hours: `reinpay rule hours <9-18|off> [--weekdays]`, local time, wrapping past midnight for ranges like `22-6`. Outside them every payment waits for the owner (rule `quiet hours`); hard limits still block first.
+- Payments per hour: `reinpay rule per-hour <count|0>` blocks a payment once that many were sent or are waiting in the last 60 minutes (rule `payments per hour`). Blocked requests do not count.
+- All three are off by default, so existing configs and their seals are unchanged.
+- Tests: 25 checks offline, plus 2 new live mainnet checks. All passing. No transaction is signed or sent.
+
 ## 0.10.0 (unreleased): working with others
 
 - `reinpay payee export [--out=file.json]` and `reinpay payee import <file>`: share a payee list signed with your wallet key. Import checks the signature, says who signed it (and warns when it is not this wallet), and adds only payees that pass the same checks as `payee add`; duplicates, taken names, expired payees and lookalike addresses are skipped and listed, and token contracts are still refused.

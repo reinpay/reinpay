@@ -13,7 +13,7 @@ export function spendingReport(receipts, { days = 7, now = Date.now() } = {}) {
   const dayKeys = Array.from({ length: n }, (_, i) => localDay(now - i * DAY));
   const inRange = new Set(dayKeys);
   const byDay = Object.fromEntries(dayKeys.map((d) => [d, {}]));
-  const payees = {}, blockedBy = {};
+  const payees = {}, blockedBy = {}, cats = {};
   const total = {};
   for (const r of receipts) {
     const d = localDay(r.createdAt);
@@ -26,6 +26,7 @@ export function spendingReport(receipts, { days = 7, now = Date.now() } = {}) {
       const key = `${r.payee}|${sym}`;
       const p = (payees[key] ||= { payee: r.payee, token: sym, sent: 0n, count: 0 });
       p.sent += raw; p.count++;
+      if (r.category) { const k = `${r.category}|${sym}`; const c = (cats[k] ||= { category: r.category, token: sym, sent: 0n, count: 0 }); c.sent += raw; c.count++; }
     } else if (OPEN.includes(r.status)) {
       for (const x of [slot, t]) { x.waiting += raw; x.waitingCount++; }
     } else if (r.status === "blocked") {
@@ -44,6 +45,7 @@ export function spendingReport(receipts, { days = 7, now = Date.now() } = {}) {
     topPayees: Object.keys(TOKENS).flatMap((sym) => Object.values(payees).filter((p) => p.token === sym)
       .sort((a, b) => (b.sent > a.sent ? 1 : b.sent < a.sent ? -1 : 0)).slice(0, 5)
       .map((p) => ({ payee: p.payee, token: p.token, sent: amt(p.sent, p.token), payments: p.count }))),
+    byCategory: Object.values(cats).map((c) => ({ category: c.category, token: c.token, sent: amt(c.sent, c.token), payments: c.count })),
     blockedBy: Object.entries(blockedBy).sort((a, b) => b[1] - a[1]).map(([rule, count]) => ({ rule, count })),
   };
 }
@@ -63,6 +65,7 @@ export function reportText(rep) {
     lines.push(`  ${d.day}  ${parts.length ? parts.join(" · ") : "-"}`);
   }
   if (rep.topPayees.length) { lines.push("", "Top payees:"); for (const p of rep.topPayees) lines.push(`  ${p.payee}: ${p.sent} ${p.token} in ${p.payments}`); }
+  if (rep.byCategory?.length) { lines.push("", "By category:"); for (const c of rep.byCategory) lines.push(`  ${c.category}: ${c.sent} ${c.token} in ${c.payments}`); }
   if (rep.blockedBy.length) { lines.push("", "Blocked by:"); for (const b of rep.blockedBy) lines.push(`  ${b.rule}: ${b.count}`); }
   return lines.join("\n");
 }

@@ -85,7 +85,19 @@ reinpay grant USDG 20 --for=2h    # extra budget for one task, gone when the tim
 reinpay backup                    # move this wallet: key (still encrypted), rules, payees, receipts
 reinpay payee export              # your payee list, signed, to share with a teammate or another profile
 reinpay payee import list.json    # add payees from a signed list, after the usual checks
+reinpay payee category "GPU credits" compute      # group payees
+reinpay rule category compute daily USDG 10       # a daily budget for the whole group
+reinpay rule hours 9-18 --weekdays                # outside these hours, everything waits for you
+reinpay rule per-hour 10                          # at most 10 payments in any hour
 ```
+
+### Smarter rules
+
+All three are off until you set them.
+
+- **Category budgets.** Put payees in a category with `reinpay payee category <payee> <name>` and give the category its own daily budget with `reinpay rule category <name> daily <token> <amount>`. A payment must fit both the overall budget and its category's. Receipts keep the category, `reinpay report` sums spending per category, and shared payee lists carry it.
+- **Payment hours.** `reinpay rule hours 9-18` (local time; `22-6` wraps past midnight; `--weekdays` skips Saturday and Sunday). Outside those hours every payment waits for `reinpay approve`, even inside your rules. Hard limits still block first.
+- **Payments per hour.** `reinpay rule per-hour 10` blocks a payment when 10 were already sent or are waiting in the last 60 minutes, so an agent cannot drain a budget in many small steps. Blocked requests do not count.
 
 ### Working with others
 
@@ -227,7 +239,7 @@ The repeat guard is 10 minutes, and `autosend` is off. A token with no daily bud
 npm test
 ```
 
-`test/rules.test.mjs` checks every rule offline, `test/lock.test.mjs` the spend lock (including two processes), `test/report.test.mjs` the spending report, `test/notify.test.mjs` the owner notifications, `test/csv.test.mjs` the CSV export and `test/profile.test.mjs` the profiles, `test/seal.test.mjs` the config seal and unlock, `test/guard.test.mjs` the lookalike guard, `test/verify.test.mjs` the on-chain receipt check and `test/doctor.test.mjs` the checkup and `test/freeze.test.mjs` the freeze, the circuit breaker and expiring payees, `test/paper.test.mjs` statements, the first-payment rule and the digest, `test/plan.test.mjs` grants, dry runs and backup/restore, and `test/share.test.mjs` shared payee lists, signed webhooks and read-only MCP. `test/live.mjs` runs on mainnet:
+`test/rules.test.mjs` checks every rule offline, `test/lock.test.mjs` the spend lock (including two processes), `test/report.test.mjs` the spending report, `test/notify.test.mjs` the owner notifications, `test/csv.test.mjs` the CSV export and `test/profile.test.mjs` the profiles, `test/seal.test.mjs` the config seal and unlock, `test/guard.test.mjs` the lookalike guard, `test/verify.test.mjs` the on-chain receipt check and `test/doctor.test.mjs` the checkup and `test/freeze.test.mjs` the freeze, the circuit breaker and expiring payees, `test/paper.test.mjs` statements, the first-payment rule and the digest, `test/plan.test.mjs` grants, dry runs and backup/restore, `test/share.test.mjs` shared payee lists, signed webhooks and read-only MCP, and `test/smart.test.mjs` category budgets, payment hours and the per-hour cap. `test/live.mjs` runs on mainnet:
 
 - USDG transfer simulations from a public holder, and tampered ones that must be refused;
 - the full flow with a throwaway wallet that has a pretend ETH balance only inside the simulation;
@@ -240,7 +252,8 @@ npm test
 - the agent freezing the wallet over MCP, and its next request blocked;
 - statements built from a real public payment: one with the wrong signer and one claiming someone else's payment, both refused;
 - a dry run simulated on mainnet that records nothing, and `check_payment` over MCP;
-- the read-only MCP server over stdio, and a shared payee list whose token contract is still refused.
+- the read-only MCP server over stdio, and a shared payee list whose token contract is still refused;
+- a category budget on the real payment path, before and after the mainnet simulation.
 
 No transaction is signed or sent.
 

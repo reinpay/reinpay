@@ -107,7 +107,7 @@ export async function requestPayment({ payee, amount, token = "USDG", memo = "" 
   const p = findPayee(cfg.payees, payee);
   const tokenPayee = p && p.isContract !== false ? await tokenAt(p.address) : null;
   const base = { by, wallet: from, chainId: CHAIN_ID, payee: p ? p.name : String(payee ?? ""), payeeAddress: p ? p.address : null,
-    token: symbol, tokenAddress: TOKENS[symbol].address, amount: fmt(amountRaw, symbol).split(" ")[0], amountRaw: amountRaw.toString(), memo: String(memo).slice(0, 200) };
+    ...(p?.category ? { category: p.category } : {}), token: symbol, tokenAddress: TOKENS[symbol].address, amount: fmt(amountRaw, symbol).split(" ")[0], amountRaw: amountRaw.toString(), memo: String(memo).slice(0, 200) };
   // Decide, simulate and write the receipt as one step, so a second request cannot spend the same budget in between.
   // Once the receipt exists it counts against today's budget (waiting or sending), so signing can happen outside the lock.
   const fz = frozen();
@@ -236,6 +236,9 @@ export function rulesView(now = Date.now()) {
   return {
     frozen: frozen(), circuitBreaker: breakerOf(cfg.rules) ? `freezes after ${breakerOf(cfg.rules).count} blocked requests in ${breakerOf(cfg.rules).minutes} minutes` : "off",
     firstPaymentNeedsOwner: cfg.rules.firstPayment === "ask",
+    ...(cfg.rules.maxPerHour ? { maxPaymentsPerHour: Number(cfg.rules.maxPerHour) } : {}),
+    ...(cfg.rules.hours ? { paymentHours: `${cfg.rules.hours.from}:00-${cfg.rules.hours.to}:00 local${cfg.rules.hours.weekdays ? ", weekdays only" : ""}; outside them payments wait for the owner` } : {}),
+    ...(cfg.rules.categories ? { categoryBudgets: Object.fromEntries(Object.entries(cfg.rules.categories).map(([c, v]) => [c, Object.fromEntries(Object.entries(v.daily || {}).map(([t, a]) => [t, `${a} ${t} a day`]))])) } : {}),
     tokens: per, repeatGuardMinutes: cfg.rules.repeatGuardMinutes, autoSend: !!cfg.rules.autoSend, walletUnlocked: isUnlocked(),
     ownerNotifiedBy: cfg.notify?.type || null,
     payees: cfg.payees.filter((p) => !p.disabled && !(p.expiresAt && Date.parse(p.expiresAt) <= now)).map((p) => {
@@ -247,7 +250,7 @@ export function rulesView(now = Date.now()) {
         const { spent, held } = totals(allReceipts(), t, now, p.address);
         lim[t] = { ...(m != null ? { maxPerPayment: `${m} ${t}` } : {}), ...(d != null ? { dailyBudget: `${d} ${t}`, leftToday: fmt(maxZero(parseAmount(String(d), t) - spent - held), t) } : {}) };
       }
-      return { name: p.name, address: p.address, tokens, note: p.note || null, ...(p.expiresAt ? { expiresAt: p.expiresAt } : {}), ...(Object.keys(lim).length ? { limits: lim } : {}) };
+      return { name: p.name, address: p.address, tokens, note: p.note || null, ...(p.category ? { category: p.category } : {}), ...(p.expiresAt ? { expiresAt: p.expiresAt } : {}), ...(Object.keys(lim).length ? { limits: lim } : {}) };
     }),
     note: "Only the owner can change rules or payees, and only in their own terminal. Payments that need approval wait for `reinpay approve`.",
   };

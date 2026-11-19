@@ -122,6 +122,28 @@ export function decide({ rules, receipts, request, now = Date.now(), excludeId =
     }
   }
 
+  const perHour = Number(rules.maxPerHour || 0);
+  if (perHour > 0) {
+    const since = now - 3_600_000;
+    const n = list.filter((r) => r.createdAt >= since && (DONE_SPENT.includes(r.status) || OPEN.includes(r.status))).length;
+    if (n >= perHour) return { status: "blocked", rule: "payments per hour", reason: `${n} payments were sent or are waiting in the last hour; your limit is ${perHour} per hour.` };
+  }
+  const cat = payee.category;
+  const env = cat ? rules.categories?.[cat]?.daily?.[symbol] : undefined;
+  if (env != null && env !== "") {
+    const cap = parseUnits(String(env), TOKENS[symbol].decimals);
+    const day = localDay(now);
+    let spent = 0n, held = 0n;
+    for (const r of list) {
+      if (r.category !== cat || r.token !== symbol || localDay(r.createdAt) !== day) continue;
+      if (DONE_SPENT.includes(r.status)) spent += BigInt(r.amountRaw); else if (OPEN.includes(r.status)) held += BigInt(r.amountRaw);
+    }
+    if (spent + held + amountRaw > cap) {
+      const left = cap > spent + held ? cap - spent - held : 0n;
+      return { status: "blocked", rule: "category budget", reason: `Only ${fmt(left, symbol)} of the ${cat} budget of ${fmt(cap, symbol)} is left today (sent ${fmt(spent, symbol)}, waiting ${fmt(held, symbol)}).` };
+    }
+  }
+
   const guard = Number(rules.repeatGuardMinutes || 0);
   if (guard > 0) {
     const since = now - guard * 60_000;
@@ -131,6 +153,9 @@ export function decide({ rules, receipts, request, now = Date.now(), excludeId =
   }
   if (rules.firstPayment === "ask" && !list.some((r) => r.payeeAddress === payee.address && DONE_SPENT.includes(r.status))) {
     return { status: "needs_approval", rule: "first payment", reason: `This would be the first payment to ${payee.name}. You asked to approve every first payment yourself.` };
+  }
+  if (rules.hours && !insideHours(rules.hours, now)) {
+    return { status: "needs_approval", rule: "quiet hours", reason: `Outside your payment hours (${rules.hours.from}:00 to ${rules.hours.to}:00 local${rules.hours.weekdays ? ", weekdays" : ""}). Waiting for you.` };
   }
   const line = limit(rules, "approveAbove", symbol);
   if (line !== null && amountRaw > line) return { status: "needs_approval", rule: "approval line", reason: `${fmt(amountRaw, symbol)} is above your approval line of ${fmt(line, symbol)}.` };
@@ -144,4 +169,21 @@ export function parseDuration(s) {
   const m = /^(\d{1,5})(m|h|d)$/.exec(v);
   if (!m || Number(m[1]) === 0) throw new Error(`"${s}" is not a duration. Use something like 90m, 12h or 30d (or off).`);
   return Number(m[1]) * { m: 60_000, h: 3_600_000, d: 86_400_000 }[m[2]];
+}
+
+export const CATEGORY_RE = /^[a-z0-9][a-z0-9-]{0,23}$/;
+
+/** "9-18" as { from: 9, to: 18 }; hours are local, to is exclusive; from > to wraps past midnight (e.g. 22-6). */
+export function parseHours(v) {
+  const m = /^(\d{1,2})-(\d{1,2})$/.exec(String(v || "").trim());
+  if (!m || +m[1] > 23 || +m[2] > 24 || +m[1] === +m[2]) throw new Error(`"${v}" is not an hour range. Use something like 9-18 (local time) or 22-6.`);
+  return { from: +m[1], to: +m[2] };
+}
+
+/** Is `now` inside the owner's working hours? Always true when no hours are set. */
+export function insideHours(hours, now = Date.now()) {
+  if (!hours) return true;
+  const d = new Date(now), h = d.getHours(), day = d.getDay();
+  if (hours.weekdays && (day === 0 || day === 6)) return false;
+  return hours.from < hours.to ? h >= hours.from && h < hours.to : h >= hours.from || h < hours.to;
 }

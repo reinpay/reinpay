@@ -26,6 +26,10 @@ const HELP = `reinpay ${pkg.version} - a wallet for AI agents that only spends i
   reinpay rule repeat-guard <minutes>      Hold repeats of the same payment for that long (0 turns it off)
   reinpay rule breaker <count> <minutes> | off   Freeze when the agent is blocked that often (default 5 in 10 minutes)
   reinpay rule first-payment <ask|off>     Make the first payment to every payee wait for you
+  reinpay rule hours <9-18|off> [--weekdays]   Outside these local hours, every payment waits for you
+  reinpay rule per-hour <count|0>          At most this many payments sent or waiting in any hour
+  reinpay rule category <name> daily <token> <amount|off>   A daily budget for every payee in a category
+  reinpay payee category <payee> <name|off>    Put a payee in a category (e.g. compute, data, api)
   reinpay grant <token> <amount> --for=2h [--note=...]   Extra budget for a while, on top of the daily budget
   reinpay grant list | clear               Show or remove grants
   reinpay check <payee> <amount> [token]   Dry run: what would happen to this payment now (nothing recorded or signed)
@@ -162,7 +166,23 @@ async function main() {
     requireTTY("rule");
     const cfg = C.loadConfig();
     const [name, a1, a2] = pos;
-    if (name === "first-payment") {
+    if (name === "hours") {
+      if (String(a1) === "off") delete cfg.rules.hours;
+      else cfg.rules.hours = { ...(await import("../src/rules.js")).parseHours(a1), ...(flags.has("--weekdays") ? { weekdays: true } : {}) };
+    } else if (name === "per-hour") {
+      const n = Number(a1); if (!(Number.isInteger(n) && n >= 0 && n <= 1000)) throw new Error("Usage: reinpay rule per-hour <0-1000> (0 turns it off)");
+      if (n) cfg.rules.maxPerHour = n; else delete cfg.rules.maxPerHour;
+    } else if (name === "category") {
+      const [, cat, period, tok, amt] = pos;
+      const { CATEGORY_RE } = await import("../src/rules.js");
+      const { syncTokens } = await import("../src/chain.js");
+      const T = String(tok || "").toUpperCase();
+      if (!CATEGORY_RE.test(String(cat || "")) || period !== "daily" || !Object.keys(syncTokens(cfg)).includes(T) || !(amt === "off" || /^\d+(\.\d+)?$/.test(String(amt || "")))) throw new Error("Usage: reinpay rule category <name> daily <token> <amount|off>  (name: lowercase letters, digits, dashes)");
+      const cats = { ...(cfg.rules.categories || {}) }, c = { daily: { ...(cats[cat]?.daily || {}) } };
+      if (amt === "off") delete c.daily[T]; else c.daily[T] = amt;
+      if (Object.keys(c.daily).length) cats[cat] = c; else delete cats[cat];
+      if (Object.keys(cats).length) cfg.rules.categories = cats; else delete cfg.rules.categories;
+    } else if (name === "first-payment") {
       if (!["ask", "off"].includes(String(a1))) throw new Error("Usage: reinpay rule first-payment <ask|off>");
       if (a1 === "ask") cfg.rules.firstPayment = "ask"; else delete cfg.rules.firstPayment;
     } else if (name === "breaker") {
@@ -244,6 +264,12 @@ async function main() {
       return console.log(`Added ${p.name} ${p.address}${p.expiresAt ? `, until ${p.expiresAt}` : ""}${p.isContract ? " (a contract, not a personal wallet: make sure it can receive tokens)" : ""}.`);
     }
     if (sub === "remove") return console.log(`Removed ${P.removePayee(name).name}.`);
+    if (sub === "category") {
+      const cat = pos[2], { CATEGORY_RE } = await import("../src/rules.js");
+      if (cat !== "off" && !CATEGORY_RE.test(String(cat || ""))) throw new Error("Usage: reinpay payee category <payee> <name|off>  (name: lowercase letters, digits, dashes)");
+      const p = P.setPayee(name, { category: cat === "off" ? undefined : cat });
+      return console.log(cat === "off" ? `${p.name} has no category.` : `${p.name} is in ${cat}.`);
+    }
     if (sub === "until") {
       const ms = (await import("../src/rules.js")).parseDuration(pos[2]);
       const p = P.setPayee(name, { expiresAt: ms ? new Date(Date.now() + ms).toISOString() : undefined });
@@ -255,7 +281,7 @@ async function main() {
       const p = P.setPayeeLimit(name, kind, tok, amount);
       return console.log(`${p.name}: daily ${JSON.stringify(p.daily || {})}, max per payment ${JSON.stringify(p.maxPerPayment || {})}.`);
     }
-    throw new Error("Usage: reinpay payee <add|list|remove|off|on|limit|until|export|import>");
+    throw new Error("Usage: reinpay payee <add|list|remove|off|on|limit|until|category|export|import>");
   }
   if (cmd === "pending") {
     const list = [...P.listReceipts({ status: "needs_approval", limit: 200 }), ...P.listReceipts({ status: "ready", limit: 200 })];
@@ -422,7 +448,7 @@ async function main() {
 }
 
 // Commands that change rules, payees, tokens or notifications seal the config with the wallet key afterwards.
-const MUTATING = ["rule", "autosend"].includes(cmd) || (cmd === "grant" && pos[0] && pos[0] !== "list") || (cmd === "notify" && pos[0] !== "test") || (cmd === "payee" && ["add", "remove", "off", "on", "limit", "until", "import"].includes(pos[0])) || (cmd === "token" && ["add", "remove"].includes(pos[0]));
+const MUTATING = ["rule", "autosend"].includes(cmd) || (cmd === "grant" && pos[0] && pos[0] !== "list") || (cmd === "notify" && pos[0] !== "test") || (cmd === "payee" && ["add", "remove", "off", "on", "limit", "until", "import", "category"].includes(pos[0])) || (cmd === "token" && ["add", "remove"].includes(pos[0]));
 async function reseal(passphrase) {
   const K = await import("../src/keystore.js"), C = await import("../src/config.js"), { sealConfig } = await import("../src/seal.js");
   const pass = passphrase ?? (K.isUnlocked() ? undefined : await ask("Passphrase to seal your rules (hidden): ", { hidden: true }));

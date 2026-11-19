@@ -305,5 +305,13 @@ check("doctor: the brakes line shows the freeze the agent made", dr.find((x) => 
 (await import("../src/freeze.js")).unfreeze();
 check("doctor: shows the confirmed lookalike as something to look at", (await D.doctor()).find((x) => x.name === "payees").level === "warn");
 
+// ---- 0.11: a category budget on the real payment path ----
+P.setPayee("USDG only", { category: "compute" });
+{ const c0 = C.loadConfig(); c0.rules.categories = { compute: { daily: { USDG: "2" } } }; C.saveConfig(c0); }
+const cb = await rq("USDG only", "3", "USDG", "category test");
+check("category budget: 3 USDG to a compute payee with a 2 USDG compute budget is blocked", cb.status === "blocked" && cb.rule === "category budget" && cb.category === "compute", `${cb.rule}: ${cb.reason}`);
+const cs = await rq("USDG only", "1", "USDG", "category test");
+check("inside the compute budget, the rules let it through to the mainnet simulation (blocked there: the test wallet holds no USDG)", cs.rule === "simulation", `${cs.rule}: ${cs.reason}`);
+
 console.log(`\n${pass} passed, ${fail} failed. No transaction was signed or sent.`);
 process.exit(fail ? 1 : 0);
