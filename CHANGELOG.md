@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.15.0 (unreleased): limits in dollars
+
+- `reinpay rule usd max <amount|off>` and `reinpay rule usd daily <amount|off>`: a cap per payment and a daily budget in dollars across USDG and ETH (rules `usd max`, `usd daily budget`).
+- ETH is priced from `slot0` of two WETH/USDG pools on Robinhood Chain, checked to really be WETH/USDG. No price (a pool down, a wrong pair, or the two more than 2% apart) means the payment is blocked (rule `usd price`). Tokens other than USDG and ETH are blocked while USD rules are on.
+- Receipts store `usdValue` and `ethPriceUsdg`. Approvals and `check_payment` use a fresh price. `reinpay price` shows both pools and the price in use. `get_rules` tells the agent.
+- Tests: 17 checks offline with a pretend chain (including a manipulated pool), plus 3 new live mainnet checks with the real price. The live test now looks for a public USDG holder in a shorter window, since USDG traffic on Robinhood Chain has grown. All passing. No transaction is signed or sent.
+
+## 0.14.0 (unreleased): many agents
+
+- `reinpay profiles --status [--json]`: every wallet on this computer on one screen, from local files only: locked or unlocked, autosend, frozen and by whom, today's spend against the budget, payments waiting for you, requests blocked today.
+- `reinpay freeze --all [reason]` and `reinpay unfreeze --all` (terminal only, one yes after listing what is frozen).
+- `reinpay digest --all`: one summary for every wallet, sent through the default profile's notifications.
+- Tests: 11 checks offline, including the CLI against a throwaway home folder. All passing.
+
+## 0.13.0 (unreleased): approvals
+
+- `reinpay approve <RP-id> [RP-id ...] | --all`: approve several waiting payments with one yes and one passphrase. Each one is checked against the rules and simulated again before it is signed; a failure on one does not stop the rest.
+- `reinpay rule expire-after <24h|90m|off>`: waiting payments older than that become `expired`, stop holding the budget and cannot be approved. Checked when requests are made, listed or approved.
+- `reinpay rule memo <min-chars|off>`: requests whose memo is shorter are blocked (rule `memo`). `get_rules` tells the agent; `check_payment` accepts a memo.
+- Tests: 13 checks offline. All passing.
+
 ## 0.12.0 (unreleased): bills
 
 - Scheduled payments: `reinpay schedule add <payee> <amount> <token> <daily|weekly|monthly> [--start=] [--memo=]`, `schedule list | pause | resume | remove`, and `schedule run` for cron. Every due payment goes through every rule and the mainnet simulation, and waits for the owner unless autosend is on and the wallet is unlocked. Missed slots are skipped. Schedules are part of the sealed config (a config without schedules seals exactly as before); run state lives in `schedules-state.json`, so runs never break the seal. `schedule run` refuses to run if the seal does not match.

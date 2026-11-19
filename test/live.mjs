@@ -30,7 +30,7 @@ check(`USDG ${U}: symbol ${sym}, ${dec} decimals, has code`, sym === "USDG" && d
 
 // ---- simulations from a real public USDG holder (found from recent Transfer logs) ----
 const head = await c.getBlockNumber();
-const logs = await c.getLogs({ address: U, event: parseAbiItem("event Transfer(address indexed from, address indexed to, uint256 value)"), fromBlock: head - 4_000n, toBlock: head });
+const logs = await c.getLogs({ address: U, event: parseAbiItem("event Transfer(address indexed from, address indexed to, uint256 value)"), fromBlock: head - 1_500n, toBlock: head });
 let holder = null, hbal = 0n;
 for (const to of [...new Set(logs.map((l) => l.args.to))].slice(-60)) {
   const cd = await c.getCode({ address: to });
@@ -328,5 +328,16 @@ const sst = {}; check("schedule: a schedule that started a minute ago is due", S
 SC.advance(sch, sst);
 const sr = await P.requestPayment({ payee: sch.payee, amount: sch.amount, token: sch.token, memo: `${sch.id} daily` }, { by: "schedule" });
 check("schedule: its payment goes through the rules like any other, and is not due again today", !!sr.rule && SC.due([sch], sst).length === 0, `${sr.status}: ${sr.rule}`);
+// ---- 0.15: USD rules with the real two-pool ETH price ----
+const PRC = await import("../src/price.js");
+const ep = await PRC.ethPrice();
+check(`ETH price from two WETH/USDG pools on mainnet (${ep.price?.toFixed(2)} USDG)`, ep.price > 100 && ep.price < 100000 && ep.pools.every((x) => x.price), JSON.stringify(ep.pools.map((x) => x.price)));
+{ const c0 = C.loadConfig(); c0.rules.usd = { max: "0.5" }; c0.rules.repeatGuardMinutes = 0; c0.rules.daily = { ...c0.rules.daily, ETH: "1" }; c0.rules.weekly = {}; c0.rules.maxPerPayment = { ...c0.rules.maxPerPayment, ETH: "0.01" }; C.saveConfig(c0); }
+const ub = await rq("Test payee", "0.0004", "ETH", "usd test");
+check("usd max 0.5: 0.0004 ETH (about 0.72 USD) is blocked, with its value", ub.status === "blocked" && ub.rule === "usd max" && Number(ub.usdValue) > 0.5, `${ub.rule}: ${ub.usdValue} USD at ${ub.ethPriceUsdg}`);
+const uok = await rq("Test payee", "0.0001", "ETH", "usd test");
+check("usd max 0.5: 0.0001 ETH (about 0.18 USD) passes the USD rule and gets its value on the receipt", uok.rule !== "usd max" && uok.rule !== "usd price" && Number(uok.usdValue) > 0, `${uok.rule}: ${uok.usdValue} USD`);
+{ const c0 = C.loadConfig(); delete c0.rules.usd; C.saveConfig(c0); }
+
 console.log(`\n${pass} passed, ${fail} failed. No transaction was signed or sent.`);
 process.exit(fail ? 1 : 0);

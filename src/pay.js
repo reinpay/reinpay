@@ -12,6 +12,7 @@ import { walletAddress, loadAccount, isUnlocked } from "./keystore.js";
 import { withLock } from "./lock.js";
 import { notifyOwner } from "./notify.js";
 import { checkSeal } from "./seal.js";
+import { usdValue } from "./price.js";
 import { findLookalike, LookalikeError } from "./lookalike.js";
 import { frozen, freeze, tripped, breakerOf } from "./freeze.js";
 
@@ -103,6 +104,13 @@ async function sendNow(r, tx, account) {
 }
 
 /** The agent's way to pay. Never signs unless the payment is inside every rule AND the owner turned on autoSend AND unlocked. */
+const usdRules = (rules) => !!rules?.usd && (rules.usd.max != null || rules.usd.daily != null);
+async function usdFor(cfg, symbol, amountRaw) {
+  if (!usdRules(cfg.rules)) return {};
+  const u = await usdValue(symbol, amountRaw).catch((e) => ({ value: null, reason: e.message }));
+  return u.value === null ? { usdReason: u.reason } : { usdRaw: u.value.toString(), ethPrice: symbol === "ETH" ? u.price : undefined };
+}
+
 export async function requestPayment({ payee, amount, token = "USDG", memo = "" }, { by = "agent" } = {}) {
   const from = requireWallet();
   const cfg = loadConfig();
@@ -117,8 +125,11 @@ export async function requestPayment({ payee, amount, token = "USDG", memo = "" 
   // Once the receipt exists it counts against today's budget (waiting or sending), so signing can happen outside the lock.
   const fz = frozen();
   if (fz) return view(addReceipt({ ...base, status: "blocked", rule: "frozen", reason: `Reinpay is frozen (${fz.reason}). Nothing is paid until the owner runs reinpay unfreeze.` }));
+  const usd = await usdFor(cfg, symbol, amountRaw);
+  if (usd.usdRaw) { base.usdRaw = usd.usdRaw; base.usdValue = fmt(BigInt(usd.usdRaw), "USDG").split(" ")[0]; if (usd.ethPrice) base.ethPriceUsdg = usd.ethPrice.toFixed(2); }
   const r = tokenPayee ? addReceipt({ ...base, status: "blocked", rule: "token contract", reason: `${p.name} (${p.address}) is the contract of ${tokenPayee}. Tokens sent to a token contract are usually stuck for good. Ask the owner to fix this payee.` }) : await withLock(async () => {
-    const d = decide({ rules: cfg.rules, receipts: allReceipts(), request: { payee: p, token: symbol, amountRaw } });
+    expireStale(cfg.rules);
+    const d = decide({ rules: cfg.rules, receipts: allReceipts(), request: { payee: p, token: symbol, amountRaw, memo, usdRaw: usd.usdRaw, usdReason: usd.usdReason } });
     if (d.status === "blocked") return addReceipt({ ...base, status: "blocked", rule: d.rule, reason: d.reason });
     const ch = await check(from, symbol, p.address, amountRaw);
     if (ch.problem) return addReceipt({ ...base, status: "blocked", rule: "simulation", reason: `Simulated on mainnet: ${ch.problem}.`, simulation: simView(ch.sim) });
@@ -177,7 +188,7 @@ export async function budgetAlert(cfg, symbol, { now = Date.now(), fetch: f } = 
  * would let it through or ask the owner, the payment is simulated on mainnet. No receipt is written, nothing counts
  * against any budget, nothing is signed, and the circuit breaker does not see it.
  */
-export async function previewPayment({ payee, amount, token = "USDG" }) {
+export async function previewPayment({ payee, amount, token = "USDG", memo }) {
   const from = requireWallet();
   const cfg = loadConfig();
   syncTokens(cfg);
@@ -188,7 +199,8 @@ export async function previewPayment({ payee, amount, token = "USDG" }) {
   const fz = frozen();
   if (fz) return out("blocked", "frozen", `Reinpay is frozen (${fz.reason}).`);
   if (p && p.isContract !== false) { const tok = await tokenAt(p.address); if (tok) return out("blocked", "token contract", `${p.name} is the contract of ${tok}.`); }
-  const d = decide({ rules: cfg.rules, receipts: allReceipts(), request: { payee: p, token: symbol, amountRaw } });
+  const usd = await usdFor(cfg, symbol, amountRaw);
+  const d = decide({ rules: memo === undefined ? { ...cfg.rules, memoMin: 0 } : cfg.rules, receipts: allReceipts(), request: { payee: p, token: symbol, amountRaw, memo, usdRaw: usd.usdRaw, usdReason: usd.usdReason } });
   if (d.status === "blocked") return out("blocked", d.rule, d.reason);
   const ch = await check(from, symbol, p.address, amountRaw);
   if (ch.problem) return out("blocked", "simulation", `Simulated on mainnet: ${ch.problem}.`, { simulation: simView(ch.sim) });
@@ -196,8 +208,18 @@ export async function previewPayment({ payee, amount, token = "USDG" }) {
   return out(wouldBe, d.rule, wouldBe === "ready" ? `${d.reason} It would wait for the owner because autoSend is ${cfg.rules.autoSend ? "on but the wallet is locked" : "off"}.` : d.reason, { simulation: simView(ch.sim, ch.feeWei) });
 }
 
+/** Waiting payments older than rules.expireAfterMinutes become "expired", so they stop holding today's budget. */
+export function expireStale(rules, now = Date.now()) {
+  const m = Number(rules?.expireAfterMinutes || 0);
+  if (!m) return 0;
+  let n = 0;
+  for (const r of allReceipts()) if (["needs_approval", "ready"].includes(r.status) && now - r.createdAt > m * 60_000) { updateReceipt(r.id, { status: "expired" }, `Expired: waited more than ${m} minutes for the owner.`); n++; }
+  return n;
+}
+
 /** Owner only (terminal): approve a waiting payment. Rules and the simulation are checked again first. */
 export async function approve(id, { passphrase } = {}) {
+  expireStale(loadConfig().rules);
   const pre = getReceipt(id);
   if (!pre) throw new Error(`No receipt ${id}.`);
   if (!["needs_approval", "ready"].includes(pre.status)) throw new Error(`${pre.id} is ${pre.status}; only waiting payments can be approved.`);
@@ -212,7 +234,8 @@ export async function approve(id, { passphrase } = {}) {
     const cfg = loadConfig();
     const p = findPayee(cfg.payees, r.payeeAddress);
     if (!p || getAddress(p.address) !== getAddress(r.payeeAddress || "0x0000000000000000000000000000000000000000")) return { final: updateReceipt(r.id, { status: "blocked", rule: "payee list", reason: "This payee is no longer on your payee list." }, "Approval refused: payee not on the list.") };
-    const d = decide({ rules: { ...cfg.rules, repeatGuardMinutes: 0, approveAbove: {} }, receipts: allReceipts(), request: { payee: p, token: r.token, amountRaw: BigInt(r.amountRaw) }, excludeId: r.id });
+    const usd = await usdFor(cfg, r.token, BigInt(r.amountRaw));
+    const d = decide({ rules: { ...cfg.rules, repeatGuardMinutes: 0, approveAbove: {}, memoMin: 0 }, receipts: allReceipts(), request: { payee: p, token: r.token, amountRaw: BigInt(r.amountRaw), usdRaw: usd.usdRaw, usdReason: usd.usdReason }, excludeId: r.id });
     if (d.status === "blocked") return { final: updateReceipt(r.id, { status: "blocked", rule: d.rule, reason: d.reason }, `Approval refused: ${d.reason}`) };
     // Build the transaction fresh from the payee list and the amount, simulate exactly that, and sign exactly that.
     const ch = await check(r.wallet, r.token, getAddress(p.address), BigInt(r.amountRaw));
@@ -233,6 +256,7 @@ export function reject(id, why = "Rejected by the owner.") {
 }
 
 export function listReceipts({ status, limit: n = 20 } = {}) {
+  try { expireStale(loadConfig().rules); } catch { /* reading receipts never fails because of this */ }
   let list = allReceipts().slice().reverse();
   if (status) list = list.filter((r) => r.status === status);
   return list.slice(0, Math.min(Math.max(Number(n) || 20, 1), 200)).map(view);
@@ -262,6 +286,9 @@ export function rulesView(now = Date.now()) {
   return {
     frozen: frozen(), circuitBreaker: breakerOf(cfg.rules) ? `freezes after ${breakerOf(cfg.rules).count} blocked requests in ${breakerOf(cfg.rules).minutes} minutes` : "off",
     firstPaymentNeedsOwner: cfg.rules.firstPayment === "ask",
+    ...(usdRules(cfg.rules) ? { usdRules: { ...(cfg.rules.usd.max != null ? { maxPerPayment: `${cfg.rules.usd.max} USD` } : {}), ...(cfg.rules.usd.daily != null ? { dailyAcrossTokens: `${cfg.rules.usd.daily} USD` } : {}), priceSource: "two WETH/USDG pools on Robinhood Chain; payments in other tokens are blocked while USD rules are on" } } : {}),
+    ...(cfg.rules.memoMin ? { memoRequired: `at least ${cfg.rules.memoMin} characters saying what the payment is for` } : {}),
+    ...(cfg.rules.expireAfterMinutes ? { waitingPaymentsExpireAfterMinutes: Number(cfg.rules.expireAfterMinutes) } : {}),
     ...(cfg.schedules?.length ? { scheduledPayments: cfg.schedules.map((x) => ({ id: x.id, payee: x.payee, amount: `${x.amount} ${x.token}`, every: x.every, starts: x.start, ...(x.paused ? { paused: true } : {}) })) } : {}),
     ...(cfg.rules.maxPerHour ? { maxPaymentsPerHour: Number(cfg.rules.maxPerHour) } : {}),
     ...(cfg.rules.hours ? { paymentHours: `${cfg.rules.hours.from}:00-${cfg.rules.hours.to}:00 local${cfg.rules.hours.weekdays ? ", weekdays only" : ""}; outside them payments wait for the owner` } : {}),

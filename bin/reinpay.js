@@ -13,7 +13,7 @@ const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url),
 const HELP = `reinpay ${pkg.version} - a wallet for AI agents that only spends inside your rules (Robinhood Chain mainnet, chain id 4663)
 
   reinpay mcp [--read-only]                Run the MCP server on stdio (your agent host starts this); --read-only leaves out request_payment
-  reinpay profiles                         List wallets on this computer (one per agent)
+  reinpay profiles [--status]              List wallets on this computer (one per agent); --status: today's spend, waiting, frozen
   --profile=<name>                         Use that agent's wallet for any command, e.g. reinpay init --profile=research
   reinpay init [--import]                  Create (or import) the encrypted wallet. Terminal only.
   reinpay address                          Print the wallet address
@@ -26,6 +26,10 @@ const HELP = `reinpay ${pkg.version} - a wallet for AI agents that only spends i
   reinpay rule repeat-guard <minutes>      Hold repeats of the same payment for that long (0 turns it off)
   reinpay rule breaker <count> <minutes> | off   Freeze when the agent is blocked that often (default 5 in 10 minutes)
   reinpay rule first-payment <ask|off>     Make the first payment to every payee wait for you
+  reinpay rule memo <min-chars|off>        Block requests whose memo does not say what they are for
+  reinpay rule usd max|daily <amount|off>  Limits in dollars across USDG and ETH (ETH priced from two on-chain pools)
+  reinpay price                            The ETH price in USDG the USD rules would use right now
+  reinpay rule expire-after <24h|90m|off>  Waiting payments expire after this long and stop holding the budget
   reinpay rule hours <9-18|off> [--weekdays]   Outside these local hours, every payment waits for you
   reinpay rule per-hour <count|0>          At most this many payments sent or waiting in any hour
   reinpay rule category <name> daily <token> <amount|off>   A daily budget for every payee in a category
@@ -33,8 +37,8 @@ const HELP = `reinpay ${pkg.version} - a wallet for AI agents that only spends i
   reinpay grant <token> <amount> --for=2h [--note=...]   Extra budget for a while, on top of the daily budget
   reinpay grant list | clear               Show or remove grants
   reinpay check <payee> <amount> [token]   Dry run: what would happen to this payment now (nothing recorded or signed)
-  reinpay freeze [reason]                  Stop every payment now (requests, autosend, approvals)
-  reinpay unfreeze                         Start again after checking reinpay receipts. Terminal only.
+  reinpay freeze [reason] [--all]          Stop every payment now (requests, autosend, approvals); --all: every profile
+  reinpay unfreeze [--all]                 Start again after checking reinpay receipts. Terminal only.
   reinpay autosend <on|off>                Send payments that are inside every rule without asking (needs unlock)
   reinpay payee add <name> <0xaddress> [--tokens=USDG,ETH] [--note=...] [--until=30d]
   reinpay payee until <name> <30d|12h|off> A payee that expires on its own
@@ -43,7 +47,7 @@ const HELP = `reinpay ${pkg.version} - a wallet for AI agents that only spends i
   reinpay payee list | remove <name> | off <name> | on <name>
   reinpay payee limit <name> <daily|max> <USDG|ETH> <amount|off>   A payee's own daily budget or max per payment
   reinpay pending                          Payments waiting for you
-  reinpay approve <RP-id>                  Check the rules again, simulate again, then sign and send
+  reinpay approve <RP-id> [RP-id ...] | --all   Check the rules again, simulate again, then sign and send (one yes for all)
   reinpay reject <RP-id>                   Refuse a waiting payment
   reinpay receipts [--status=sent] [--json | --csv]
   reinpay verify <RP-id> | --all [--json]  Read sent payments back from the chain and check them against their receipts
@@ -54,7 +58,7 @@ const HELP = `reinpay ${pkg.version} - a wallet for AI agents that only spends i
   reinpay schedule run                     Ask for every payment that is due (put this on cron); rules still apply
   reinpay pay <ethereum:… link> [--memo=...]   Ask for a payment from a payment link (EIP-681); payee must be on your list
   reinpay link <payee> <amount> [token]    Make a payment link for a payee on your list
-  reinpay digest [--days=1] [--dry]        Send a short spending summary to your Telegram or webhook (for a daily schedule)
+  reinpay digest [--days=1] [--dry] [--all]        Send a short spending summary to your Telegram or webhook (for a daily schedule)
   reinpay backup [--out=file.json]         Everything needed to move this wallet: key (still encrypted), rules, payees, receipts
   reinpay restore <file.json>              Restore a backup into an empty wallet or profile. Terminal only.
   reinpay doctor [--json]                  Check this computer's setup: Node, RPC, chain, wallet, seal, unlock, gas money, payees, budgets
@@ -101,6 +105,11 @@ async function main() {
   if (cmd === "--version" || cmd === "-v" || cmd === "version") return console.log(pkg.version);
   if (cmd === "mcp") { const { runServer } = await import("../src/server.js"); return runServer({ readOnly: flags.has("--read-only") }); }
 
+  if (cmd === "profiles" && flags.has("--status")) {
+    const FL = await import("../src/fleet.js");
+    const rows = await FL.eachProfile(() => FL.summary());
+    return console.log(flags.has("--json") ? JSON.stringify(rows, null, 2) : FL.fleetText(rows));
+  }
   if (cmd === "profiles") {
     const { readdirSync, existsSync, readFileSync: rf } = await import("node:fs");
     const { join } = await import("node:path");
@@ -146,6 +155,23 @@ async function main() {
     if ((await ask("Seal these rules and payees with your wallet key? Type yes: ")).trim().toLowerCase() !== "yes") return console.log("Not sealed.");
     return reseal();
   }
+  if (cmd === "freeze" && flags.has("--all")) {
+    const FL = await import("../src/fleet.js");
+    const reason = pos.join(" ") || "Frozen by the owner (all wallets).";
+    const rows = await FL.eachProfile(async () => { const K2 = await import("../src/keystore.js"); if (!K2.walletAddress()) return { skipped: true }; const F = await import("../src/freeze.js"); const was = F.frozen(); F.freeze({ by: "owner", reason }); return { was: !!was }; });
+    return console.log(rows.map((r) => `${r.profile.padEnd(14)} ${r.skipped ? "no wallet" : r.was ? "already frozen" : "frozen"}`).join("\n") + "\n\nEvery wallet on this computer is frozen. Unfreeze one with reinpay unfreeze --profile=<name>, or all with reinpay unfreeze --all.");
+  }
+  if (cmd === "unfreeze" && flags.has("--all")) {
+    requireTTY("unfreeze");
+    const FL = await import("../src/fleet.js");
+    const rows = await FL.eachProfile(async () => ({ f: (await import("../src/freeze.js")).frozen() }));
+    const frozen = rows.filter((r) => r.f);
+    if (!frozen.length) return console.log("No wallet is frozen.");
+    for (const r of frozen) console.log(`${r.profile.padEnd(14)} frozen since ${r.f.at} by ${r.f.by}: ${r.f.reason}`);
+    if ((await ask(`Did you check the receipts of these ${frozen.length}? Type yes to unfreeze them all: `)).trim().toLowerCase() !== "yes") return console.log("Still frozen.");
+    await FL.eachProfile(async (n) => { if (frozen.some((r) => r.profile === n)) (await import("../src/freeze.js")).unfreeze(); return {}; });
+    return console.log(`Unfrozen ${frozen.length}.`);
+  }
   if (cmd === "freeze") {
     const F = await import("../src/freeze.js");
     const was = F.frozen();
@@ -171,7 +197,19 @@ async function main() {
     requireTTY("rule");
     const cfg = C.loadConfig();
     const [name, a1, a2] = pos;
-    if (name === "hours") {
+    if (name === "usd") {
+      const k = { max: "max", daily: "daily" }[a1];
+      if (!k || !(a2 === "off" || /^\d+(\.\d+)?$/.test(String(a2 || "")))) throw new Error("Usage: reinpay rule usd <max|daily> <amount|off>");
+      const u = { ...(cfg.rules.usd || {}) };
+      if (a2 === "off") delete u[k]; else u[k] = a2;
+      if (Object.keys(u).length) cfg.rules.usd = u; else delete cfg.rules.usd;
+    } else if (name === "memo") {
+      if (String(a1) === "off") delete cfg.rules.memoMin;
+      else { const n = Number(a1); if (!(Number.isInteger(n) && n >= 1 && n <= 200)) throw new Error("Usage: reinpay rule memo <1-200|off>"); cfg.rules.memoMin = n; }
+    } else if (name === "expire-after") {
+      if (String(a1) === "off") delete cfg.rules.expireAfterMinutes;
+      else { const ms = (await import("../src/rules.js")).parseDuration(a1); if (ms < 600_000) throw new Error("Use at least 10m."); cfg.rules.expireAfterMinutes = Math.round(ms / 60_000); }
+    } else if (name === "hours") {
       if (String(a1) === "off") delete cfg.rules.hours;
       else cfg.rules.hours = { ...(await import("../src/rules.js")).parseHours(a1), ...(flags.has("--weekdays") ? { weekdays: true } : {}) };
     } else if (name === "per-hour") {
@@ -289,18 +327,21 @@ async function main() {
     throw new Error("Usage: reinpay payee <add|list|remove|off|on|limit|until|category|export|import>");
   }
   if (cmd === "pending") {
+    P.expireStale(C.loadConfig().rules);
     const list = [...P.listReceipts({ status: "needs_approval", limit: 200 }), ...P.listReceipts({ status: "ready", limit: 200 })];
     return console.log(list.length ? list.map(line).join("\n") : "Nothing is waiting for you.");
   }
   if (cmd === "approve") {
     requireTTY("approve");
-    const id = pos[0]; if (!id) throw new Error("Usage: reinpay approve <RP-id>");
     const { getReceipt, view } = await import("../src/receipts.js");
-    const r = getReceipt(id); if (!r) throw new Error(`No receipt ${id}.`);
-    console.log(line(view(r)));
-    if ((await ask("Approve and send this payment? Type yes: ")).trim().toLowerCase() !== "yes") return console.log("Not approved. Nothing was sent.");
+    P.expireStale(C.loadConfig().rules);
+    const ids = flags.has("--all") ? [...P.listReceipts({ status: "needs_approval", limit: 200 }), ...P.listReceipts({ status: "ready", limit: 200 })].map((r) => r.id).reverse() : [...new Set(pos.map((x) => x.toUpperCase()))];
+    if (!ids.length) throw new Error(flags.has("--all") ? "Nothing is waiting for you." : "Usage: reinpay approve <RP-id> [RP-id ...] | --all");
+    for (const id of ids) { const r = getReceipt(id); if (!r) throw new Error(`No receipt ${id}.`); console.log(line(view(r))); }
+    if ((await ask(`Approve and send ${ids.length === 1 ? "this payment" : `these ${ids.length} payments`}? Each is checked and simulated again first. Type yes: `)).trim().toLowerCase() !== "yes") return console.log("Not approved. Nothing was sent.");
     const pass = K.isUnlocked() ? undefined : await ask("Passphrase (hidden): ", { hidden: true });
-    return console.log(line(await P.approve(id, { passphrase: pass })));
+    for (const id of ids) { try { console.log(line(await P.approve(id, { passphrase: pass }))); } catch (e) { console.log(`${id}: ${e.message}`); } }
+    return;
   }
   if (cmd === "reject") { requireTTY("reject"); return console.log(line(P.reject(pos[0]))); }
   if (cmd === "notify") {
@@ -457,6 +498,12 @@ async function main() {
     const tok = String(pos[2] || "USDG").toUpperCase();
     return console.log(makeLink(p.address, tok, parseAmount(pos[1], tok)));
   }
+  if (cmd === "price") {
+    const { ethPrice } = await import("../src/price.js");
+    const p = await ethPrice();
+    console.log(p.pools.map((x) => `  pool ${x.pool}: ${x.price ?? "no answer"}`).join("\n"));
+    return console.log(p.price === null ? `No price: ${p.reason}. Payments that need one are blocked while USD rules are on.` : `ETH = ${p.price.toFixed(2)} USDG (average of two pools, ${((Math.abs(p.pools[0].price - p.pools[1].price) / Math.min(p.pools[0].price, p.pools[1].price)) * 100).toFixed(3)}% apart; refused above 2%).`);
+  }
   if (cmd === "statement") {
     const S = await import("../src/statement.js");
     const { readFileSync: rf, writeFileSync: wf, existsSync: ex } = await import("node:fs");
@@ -481,7 +528,12 @@ async function main() {
     const { currentDigest } = await import("../src/digest.js");
     const { allReceipts } = await import("../src/receipts.js");
     (await import("../src/chain.js")).syncTokens();
-    const text = currentDigest(allReceipts(), { days: opt("days") || 1 });
+    let text = currentDigest(allReceipts(), { days: opt("days") || 1 });
+    if (flags.has("--all")) {
+      const FL = await import("../src/fleet.js");
+      const parts = await FL.eachProfile(async () => { const RC2 = await import("../src/receipts.js"), K2 = await import("../src/keystore.js"); return K2.walletAddress() ? { t: currentDigest(RC2.allReceipts(), { days: opt("days") || 1 }) } : {}; });
+      text = parts.filter((x) => x.t).map((x) => `[${x.profile}] ${x.t}`).join("\n\n");
+    }
     if (flags.has("--dry")) return console.log(text);
     const cfg = C.loadConfig();
     if (!cfg.notify) throw new Error("Notifications are off, so there is nowhere to send the digest. Set them up with reinpay notify, or use --dry to print it.");

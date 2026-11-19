@@ -92,7 +92,29 @@ reinpay rule per-hour 10                          # at most 10 payments in any h
 reinpay schedule add "Weather API" 5 USDG weekly  # a payment that comes back every week
 reinpay pay "ethereum:0x…"                        # ask for a payment from a payment link
 reinpay notify at 80                              # a message when 80% of today's budget is used
+reinpay approve RP-00012 RP-00013                 # several at once, one yes (or --all)
+reinpay rule memo 10                              # the agent must say what a payment is for
+reinpay rule expire-after 24h                     # unanswered requests expire and free the budget
+reinpay profiles --status                         # every agent's wallet on one screen
+reinpay freeze --all "checking"                   # stop every agent at once
+reinpay rule usd max 20                           # no single payment above 20 dollars, in USDG or ETH
+reinpay rule usd daily 50                         # 50 dollars a day across USDG and ETH together
+reinpay price                                     # the ETH price those rules use right now
 ```
+
+### Limits in dollars
+
+Budgets per token cannot say "at most 20 dollars, whatever the token". `reinpay rule usd max <amount>` and `reinpay rule usd daily <amount>` can. USDG counts one to one. ETH is priced from two WETH/USDG pools on Robinhood Chain (`slot0` of each); if a pool does not answer, is not WETH/USDG, or the two prices are more than 2% apart, there is no price and an ETH payment is blocked (rule `usd price`), never guessed. While USD rules are on, payments in other tokens are blocked too, since they have no price. Receipts keep `usdValue` and `ethPriceUsdg`, so the daily dollar budget adds up what was really used. `reinpay price` shows both pools and the price in use. Both rules are off until you set them; `off` removes one.
+
+### Many agents
+
+When each agent has its own wallet (`--profile=<name>`), `reinpay profiles --status` shows them all: address, locked or unlocked, autosend, frozen, today's spend against the budget, payments waiting for you and requests blocked today. It reads local files only. `reinpay freeze --all [reason]` freezes every wallet; `reinpay unfreeze --all` (terminal only) lists the frozen ones and unfreezes them after one yes. `reinpay digest --all` sends one summary covering every wallet, through the default profile's notifications.
+
+### Approvals
+
+- `reinpay approve <RP-id> [RP-id ...]` or `reinpay approve --all` shows every payment, asks once, and then approves them one by one. Each is checked against the rules and simulated again, exactly as a single approval.
+- `reinpay rule expire-after 24h` (or `90m`, at least `10m`; `off`): a payment that waits longer than that for you becomes `expired`. It no longer holds today's budget and cannot be approved; the agent can ask again.
+- `reinpay rule memo 10` (`off`): requests whose memo has fewer characters are blocked (rule `memo`), so every receipt says what it was for. `check_payment` takes the memo too.
 
 ### Bills
 
@@ -249,7 +271,7 @@ The repeat guard is 10 minutes, and `autosend` is off. A token with no daily bud
 npm test
 ```
 
-`test/rules.test.mjs` checks every rule offline, `test/lock.test.mjs` the spend lock (including two processes), `test/report.test.mjs` the spending report, `test/notify.test.mjs` the owner notifications, `test/csv.test.mjs` the CSV export and `test/profile.test.mjs` the profiles, `test/seal.test.mjs` the config seal and unlock, `test/guard.test.mjs` the lookalike guard, `test/verify.test.mjs` the on-chain receipt check and `test/doctor.test.mjs` the checkup and `test/freeze.test.mjs` the freeze, the circuit breaker and expiring payees, `test/paper.test.mjs` statements, the first-payment rule and the digest, `test/plan.test.mjs` grants, dry runs and backup/restore, `test/share.test.mjs` shared payee lists, signed webhooks and read-only MCP, `test/smart.test.mjs` category budgets, payment hours and the per-hour cap, and `test/bills.test.mjs` payment links, schedules and budget alerts. `test/live.mjs` runs on mainnet:
+`test/rules.test.mjs` checks every rule offline, `test/lock.test.mjs` the spend lock (including two processes), `test/report.test.mjs` the spending report, `test/notify.test.mjs` the owner notifications, `test/csv.test.mjs` the CSV export and `test/profile.test.mjs` the profiles, `test/seal.test.mjs` the config seal and unlock, `test/guard.test.mjs` the lookalike guard, `test/verify.test.mjs` the on-chain receipt check and `test/doctor.test.mjs` the checkup and `test/freeze.test.mjs` the freeze, the circuit breaker and expiring payees, `test/paper.test.mjs` statements, the first-payment rule and the digest, `test/plan.test.mjs` grants, dry runs and backup/restore, `test/share.test.mjs` shared payee lists, signed webhooks and read-only MCP, `test/smart.test.mjs` category budgets, payment hours and the per-hour cap, `test/bills.test.mjs` payment links, schedules and budget alerts, `test/failclosed.test.mjs` the token-contract check when the chain cannot be read, `test/approvals.test.mjs` the memo rule and expiring requests, `test/fleet.test.mjs` the view across profiles, and `test/usd.test.mjs` the two-pool price and the dollar limits. `test/live.mjs` runs on mainnet:
 
 - USDG transfer simulations from a public holder, and tampered ones that must be refused;
 - the full flow with a throwaway wallet that has a pretend ETH balance only inside the simulation;
@@ -264,7 +286,8 @@ npm test
 - a dry run simulated on mainnet that records nothing, and `check_payment` over MCP;
 - the read-only MCP server over stdio, and a shared payee list whose token contract is still refused;
 - a category budget on the real payment path, before and after the mainnet simulation;
-- a payment link and a scheduled payment through the real payment path, and `read_payment_link` over MCP.
+- a payment link and a scheduled payment through the real payment path, and `read_payment_link` over MCP;
+- the ETH price read from two WETH/USDG pools on mainnet, and a dollar limit blocking and allowing ETH payments at that price.
 
 No transaction is signed or sent.
 

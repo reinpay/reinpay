@@ -92,6 +92,8 @@ export function decide({ rules, receipts, request, now = Date.now(), excludeId =
   if (payee.expiresAt && Date.parse(payee.expiresAt) <= now) return { status: "blocked", rule: "payee expired", reason: `${payee.name} expired on ${payee.expiresAt}. Only the owner can renew it (reinpay payee until "${payee.name}" 30d).` };
   if (payee.tokens && !payee.tokens.includes(symbol)) return { status: "blocked", rule: "payee tokens", reason: `${payee.name} may only be paid in ${payee.tokens.join(" or ")}.` };
   if (!(amountRaw > 0n)) return { status: "blocked", rule: "amount", reason: "The amount must be above zero." };
+  const memoMin = Number(rules.memoMin || 0);
+  if (memoMin > 0 && String(request.memo ?? "").trim().length < memoMin) return { status: "blocked", rule: "memo", reason: `Say what the payment is for: the memo needs at least ${memoMin} characters.` };
 
   const daily = dailyLimit(rules, symbol, now);
   if (daily === null || daily === 0n) return { status: "blocked", rule: "daily budget", reason: `There is no daily budget for ${symbol}, so the agent may not spend it.` };
@@ -141,6 +143,19 @@ export function decide({ rules, receipts, request, now = Date.now(), excludeId =
     if (spent + held + amountRaw > cap) {
       const left = cap > spent + held ? cap - spent - held : 0n;
       return { status: "blocked", rule: "category budget", reason: `Only ${fmt(left, symbol)} of the ${cat} budget of ${fmt(cap, symbol)} is left today (sent ${fmt(spent, symbol)}, waiting ${fmt(held, symbol)}).` };
+    }
+  }
+
+  if (rules.usd && (rules.usd.max != null || rules.usd.daily != null)) {
+    const usdFmt = (v) => `${formatUnits(v, 6)} USD`;
+    if (request.usdRaw == null) return { status: "blocked", rule: "usd price", reason: `Your USD rules need a price for ${symbol}, and there is none: ${request.usdReason || "unknown"}.` };
+    const u = BigInt(request.usdRaw);
+    if (rules.usd.max != null && u > parseUnits(String(rules.usd.max), 6)) return { status: "blocked", rule: "usd max", reason: `${fmt(amountRaw, symbol)} is worth about ${usdFmt(u)}, above your max of ${rules.usd.max} USD per payment.` };
+    if (rules.usd.daily != null) {
+      const cap = parseUnits(String(rules.usd.daily), 6), day = localDay(now);
+      let used = 0n;
+      for (const r of list) if (r.usdRaw != null && localDay(r.createdAt) === day && (DONE_SPENT.includes(r.status) || OPEN.includes(r.status))) used += BigInt(r.usdRaw);
+      if (used + u > cap) return { status: "blocked", rule: "usd daily budget", reason: `About ${usdFmt(u)} would take today past your ${rules.usd.daily} USD budget across all tokens (${usdFmt(used)} used).` };
     }
   }
 
