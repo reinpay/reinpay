@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.0 (unreleased)
+
+- One wallet per agent: `--profile=<name>` on any command (`reinpay init --profile=research`, `reinpay mcp --profile=research`). Each profile has its own key, rules, payees, receipts and spend lock in `~/.reinpay/profiles/<name>`; the default stays in `~/.reinpay`. `reinpay profiles` lists them. Names are 1-32 lowercase letters, digits or dashes.
+- More tokens: `reinpay token add <0xaddress>` adds another ERC-20 on Robinhood Chain after checking that it has code, answers like a token (symbol and decimals), does not clash with a token already known, and is verified on Sourcify (exact or partial match). An added token cannot be spent until the owner sets its daily budget. `reinpay token list`, `reinpay token remove <SYMBOL>`. Balances, budgets and simulations cover added tokens; `request_payment` accepts any token `get_rules` lists.
+- CSV export: `reinpay receipts --csv` (every receipt, oldest first) and `reinpay report --csv` (one row per day and token). Text that a spreadsheet would run as a formula, such as a memo starting with `=`, is written as plain text.
+- The message for a token contract refused as a payee now names the token.
+- Tests: 55 rule, 7 lock, 9 report, 11 notification, 10 CSV and 9 profile checks offline, and 53 live mainnet checks, including a Sourcify-verified token added and an unverified one refused. All passing. Nothing is signed or sent.
+
 ## 0.3.0 (unreleased)
 
 - Token contracts are never payees. `reinpay payee add` refuses any address that answers like an ERC-20 token (its `decimals` and `totalSupply` can be read), because tokens sent to a token's own contract are almost always stuck for good. A token contract added to `config.json` by hand is blocked at payment time with the rule `token contract`. Contracts that are not tokens can still be payees and are flagged as contracts.

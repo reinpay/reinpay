@@ -1,23 +1,12 @@
 # Reinpay
 
+> **Official $REINPAY contract:** `0x17c4735E9da7F1eeB76d1cC17C2f196F38DE64b3` (Robinhood Chain mainnet). The same address is on [reinpay.app](https://reinpay.app) and pinned on [@Reinpayapp](https://x.com/Reinpayapp). Any other address using the Reinpay name is not ours. [Details](#official-token)
+
 A wallet for AI agents that only spends inside your rules.
 
 Your agent can read its budget and ask for payments. You decide the rules: a daily budget per token, a max per payment, the payees it may pay, and the amount above which it has to ask you. Every payment is simulated on **Robinhood Chain mainnet** (chain id 4663) before anything is signed, and every request gets a receipt that names the rule that decided it.
 
-Version 0.3.0. USDG and ETH. Works with any MCP host that runs a local command (Claude Code, Cursor, Codex, Windsurf, VS Code and others).
-
-## Official token
-
-| | |
-| --- | --- |
-| Name | Reinpay (`REINPAY`) |
-| Contract | `0x17c4735E9da7F1eeB76d1cC17C2f196F38DE64b3` |
-| Chain | Robinhood Chain mainnet, chain id 4663 |
-| Standard | ERC-20, 18 decimals, 1,000,000,000 supply |
-| Launched on | [Pons V2](https://ponsfamily.com/launchpad/0x17c4735e9da7f1eeb76d1cc17c2f196f38de64b3) |
-| Explorer | [Blockscout](https://robinhoodchain.blockscout.com/token/0x17c4735E9da7F1eeB76d1cC17C2f196F38DE64b3) |
-
-This is the only official contract. It is also listed on [reinpay.app](https://reinpay.app) and [@Reinpayapp](https://x.com/Reinpayapp). Any other address using the Reinpay name is not ours. The wallet itself does not need the token: it pays in USDG and ETH.
+Version 0.4.0. USDG and ETH built in; add other verified ERC-20s. Works with any MCP host that runs a local command (Claude Code, Cursor, Codex, Windsurf, VS Code and others).
 
 ## How a payment works
 
@@ -78,7 +67,7 @@ Any other host: run `reinpay mcp` as a stdio server.
 reinpay pending                   # what is waiting for you
 reinpay approve RP-00012          # re-check, re-simulate, type yes, send
 reinpay reject RP-00013
-reinpay receipts                  # everything, newest first (--json for a file)
+reinpay receipts                  # everything, newest first (--json, or --csv for a spreadsheet)
 reinpay report                    # last 7 days: sent, waiting, blocked, top payees (--days=30, --json)
 reinpay autosend on               # optional: send payments inside every rule without asking
 reinpay unlock                    # needed for autosend; reinpay lock removes the passphrase file
@@ -93,6 +82,31 @@ reinpay unlock                    # needed for autosend; reinpay lock removes th
 | `request_payment` | Ask for one payment; returns the decision and the receipt |
 | `get_receipt` | One receipt by id |
 | `list_receipts` | Recent receipts, optionally by status |
+
+## One wallet per agent
+
+Give each agent its own wallet, with its own key, rules, payees and receipts:
+
+```sh
+reinpay init --profile=research
+reinpay payee add "Search API" 0xRecipient --tokens=USDG --profile=research
+reinpay rule daily USDG 10 --profile=research
+claude mcp add --scope user reinpay-research -- reinpay mcp --profile=research
+reinpay profiles                  # list every wallet on this computer
+```
+
+Without `--profile` you use the default wallet in `~/.reinpay`. Profiles live in `~/.reinpay/profiles/<name>`.
+
+## Other tokens
+
+```sh
+reinpay token add 0xTokenAddress  # checked on-chain and on Sourcify first
+reinpay rule daily SYMBOL 100     # nothing can be spent until you set this
+reinpay token list
+reinpay token remove SYMBOL
+```
+
+A token is refused if it has no code, does not answer like an ERC-20, clashes with a symbol Reinpay already knows, or is not verified on Sourcify.
 
 ## Notifications
 
@@ -130,8 +144,9 @@ The repeat guard is 10 minutes, and `autosend` is off. A token with no daily bud
 
 ## Limits of this version
 
-- One wallet per computer, two tokens (USDG at `0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168`, and ETH).
-- Budgets are per token and per local calendar day. There is no conversion between tokens.
+- USDG (`0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168`) and ETH are built in. Other ERC-20s can be added if they are verified on Sourcify; Reinpay cannot judge whether a token is worth anything.
+- Budgets are per token. There is no conversion between tokens.
+- Profiles separate wallets on one computer; they do not share budgets.
 - Deciding a payment takes a lock in `~/.reinpay/spend.lock`, so requests are decided one at a time, even across several MCP servers. A request waits up to 30 seconds for another one to finish.
 - The simulation checks what leaves the wallet. It cannot check that a payee delivers what you paid for.
 
@@ -141,15 +156,29 @@ The repeat guard is 10 minutes, and `autosend` is off. A token with no daily bud
 npm test
 ```
 
-`test/rules.test.mjs` checks every rule offline, `test/lock.test.mjs` checks the spend lock (including two processes), `test/report.test.mjs` the spending report and `test/notify.test.mjs` the owner notifications. `test/live.mjs` runs on mainnet:
+`test/rules.test.mjs` checks every rule offline, `test/lock.test.mjs` the spend lock (including two processes), `test/report.test.mjs` the spending report, `test/notify.test.mjs` the owner notifications, `test/csv.test.mjs` the CSV export and `test/profile.test.mjs` the profiles. `test/live.mjs` runs on mainnet:
 
 - USDG transfer simulations from a public holder, and tampered ones that must be refused;
 - the full flow with a throwaway wallet that has a pretend ETH balance only inside the simulation;
 - two requests at the same moment against one budget, and a payee's own daily budget;
 - a token contract refused as a payee, weekly budgets, and a notification attempt logged on the receipt;
+- a Sourcify-verified token added and spent only after its budget is set, and an unverified one refused;
 - the MCP server over stdio.
 
 Nothing is signed or sent.
+
+## Official token
+
+| | |
+| --- | --- |
+| Name | Reinpay (`REINPAY`) |
+| Contract | `0x17c4735E9da7F1eeB76d1cC17C2f196F38DE64b3` |
+| Chain | Robinhood Chain mainnet, chain id 4663 |
+| Standard | ERC-20, 18 decimals, 1,000,000,000 supply |
+| Launched on | [Pons V2](https://ponsfamily.com/launchpad/0x17c4735e9da7f1eeb76d1cc17c2f196f38de64b3) |
+| Explorer | [Blockscout](https://robinhoodchain.blockscout.com/token/0x17c4735E9da7F1eeB76d1cC17C2f196F38DE64b3) |
+
+This is the only official contract. It is also listed on [reinpay.app](https://reinpay.app) and [@Reinpayapp](https://x.com/Reinpayapp). Any other address using the Reinpay name is not ours. The wallet itself does not need the token: it pays in USDG and ETH.
 
 ## Licence
 

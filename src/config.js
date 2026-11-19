@@ -3,7 +3,17 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { mkdirSync, readFileSync, writeFileSync, existsSync, chmodSync, renameSync } from "node:fs";
 
-export const HOME = () => process.env.REINPAY_HOME || join(homedir(), ".reinpay");
+// Profiles: one wallet per agent. The default profile lives in ~/.reinpay; a named one in ~/.reinpay/profiles/<name>,
+// each with its own key, rules, payees, receipts and spend lock.
+export const PROFILE_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
+export const ROOT = () => join(homedir(), ".reinpay");
+export function profileName() {
+  const p = process.env.REINPAY_PROFILE;
+  if (!p || p === "default") return null;
+  if (!PROFILE_RE.test(p)) throw new Error(`Profile "${p}": use 1-32 lowercase letters, digits or dashes.`);
+  return p;
+}
+export const HOME = () => process.env.REINPAY_HOME || (profileName() ? join(ROOT(), "profiles", profileName()) : ROOT());
 export const paths = () => ({
   dir: HOME(),
   keystore: join(HOME(), "keystore.json"),

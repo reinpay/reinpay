@@ -128,6 +128,34 @@ cfg.rules.autoSend = false; C.saveConfig(cfg);
   P.reject(nt.id, "Test cleanup.");
   delete cfg3.notify; cfg3.rules.daily.ETH = "0.005"; C.saveConfig(cfg3);
 }
+// 0.4.0: extra tokens, checked on-chain and on Sourcify before they can be added
+{
+  const WETH = "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73"; // Wrapped Ether on Robinhood Chain, a public token
+  const REINPAY_TOKEN = "0x17c4735E9da7F1eeB76d1cC17C2f196F38DE64b3";
+  let e1 = ""; try { await P.addToken(REINPAY_TOKEN); } catch (e) { e1 = e.message; }
+  check("a token that is not verified on Sourcify is refused", /not verified on Sourcify/.test(e1), e1.slice(0, 90));
+  let e2 = ""; try { await P.addToken(DEAD); } catch (e) { e2 = e.message; }
+  check("an address with no contract code is refused", /no contract code/.test(e2));
+  let e3 = ""; try { await P.addToken("0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168"); } catch (e) { e3 = e.message; }
+  check("USDG is already built in", /already a token/.test(e3));
+  const t = await P.addToken(WETH);
+  check(`WETH is added after the Sourcify check (${t.symbol}, ${t.decimals} decimals, ${t.sourcify})`, t.symbol === "WETH" && t.decimals === 18 && ["exact_match", "match"].includes(t.sourcify));
+  const rv = P.rulesView().tokens.WETH;
+  check("an added token has no daily budget until the owner sets one", rv && rv.dailyBudget === null);
+  const w1 = await rq("Test payee", "0.0001", "WETH", "weth");
+  check("so the agent cannot spend it yet", w1.status === "blocked" && w1.rule === "daily budget");
+  const c4 = C.loadConfig(); c4.rules.daily.WETH = "0.001"; C.saveConfig(c4);
+  const w2 = await rq("Test payee", "0.0001", "WETH", "weth");
+  check("with a budget, a WETH payment is checked against the real balance and simulated (the test wallet holds none)", w2.status === "blocked" && /holds 0 WETH/.test(w2.reason), w2.reason);
+  const ws = await P.walletStatus();
+  check(`wallet_status reads the WETH balance too (${ws.balances.WETH})`, ws.balances.WETH === "0");
+  let e4 = ""; try { await P.addPayee({ name: "WETH contract", address: WETH }); } catch (e) { e4 = e.message; }
+  check("the added token's own contract is still refused as a payee", /contract of WETH/.test(e4));
+  P.removeToken("WETH");
+  check("removing the token takes it out of the rules", !P.rulesView().tokens.WETH);
+  let e5 = ""; try { P.removeToken("USDG"); } catch (e) { e5 = e.message; }
+  check("built-in tokens cannot be removed", /built in/.test(e5));
+}
 let threw = "";
 try { await P.approve(r8.id); } catch (e) { threw = e.message; }
 check("a blocked payment cannot be approved", /only waiting payments/.test(threw));

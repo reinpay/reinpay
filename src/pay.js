@@ -1,7 +1,7 @@
 // Payment requests: decide by the rules, simulate on mainnet, keep a receipt, and send only when allowed.
 // The agent (MCP) can request and read. Only the owner's terminal can approve, reject, or change rules and payees.
 import { encodeFunctionData, erc20Abi, getAddress, isAddress, formatEther, createWalletClient } from "viem";
-import { publicClient, robinhoodChain, transport, token as tokenOf, TOKENS, txLink, addrLink, CHAIN_ID } from "./chain.js";
+import { publicClient, robinhoodChain, transport, token as tokenOf, TOKENS, BUILTIN, syncTokens, txLink, addrLink, CHAIN_ID } from "./chain.js";
 import { loadConfig, saveConfig } from "./config.js";
 import { decide, findPayee, parseAmount, totals, limit, fmt } from "./rules.js";
 
@@ -29,11 +29,9 @@ export function buildTx(symbol, to, amountRaw) {
 
 async function balances(address) {
   const c = publicClient();
-  const [eth, usdg] = await Promise.all([
-    c.getBalance({ address }),
-    c.readContract({ address: TOKENS.USDG.address, abi: erc20Abi, functionName: "balanceOf", args: [address] }),
-  ]);
-  return { ETH: eth, USDG: usdg };
+  const list = Object.values(TOKENS);
+  const vals = await Promise.all(list.map((t) => (t.address ? c.readContract({ address: t.address, abi: erc20Abi, functionName: "balanceOf", args: [address] }) : c.getBalance({ address }))));
+  return Object.fromEntries(list.map((t, i) => [t.symbol, vals[i]]));
 }
 
 /** Simulate the payment and check the wallet can pay it plus the network fee. Returns { problem, sim, feeWei }. */
@@ -99,6 +97,7 @@ async function sendNow(r, passphrase, opened) {
 export async function requestPayment({ payee, amount, token = "USDG", memo = "" }, { by = "agent" } = {}) {
   const from = requireWallet();
   const cfg = loadConfig();
+  syncTokens(cfg);
   const symbol = tokenOf(token).symbol;
   const amountRaw = parseAmount(amount, symbol);
   const p = findPayee(cfg.payees, payee);
@@ -164,6 +163,7 @@ export function listReceipts({ status, limit: n = 20 } = {}) {
 
 export function rulesView(now = Date.now()) {
   const cfg = loadConfig();
+  syncTokens(cfg);
   const per = {};
   for (const s of Object.keys(TOKENS)) {
     const daily = limit(cfg.rules, "daily", s);
@@ -201,17 +201,21 @@ export function rulesView(now = Date.now()) {
 
 export async function walletStatus() {
   const a = requireWallet();
+  syncTokens();
   const b = await balances(a);
-  return { address: a, chainId: CHAIN_ID, explorer: addrLink(a), balances: { ETH: formatEther(b.ETH), USDG: fmt(b.USDG, "USDG").split(" ")[0] }, ...rulesView() };
+  return { address: a, chainId: CHAIN_ID, explorer: addrLink(a), balances: Object.fromEntries(Object.entries(b).map(([s, v]) => [s, fmt(v, s).split(" ")[0]])), ...rulesView() };
 }
 
 // ---- payees (owner only, from the CLI) ----
 export async function addPayee({ name, address, tokens, note, maxPerPayment }) {
+  syncTokens();
+  if (tokens) for (const t of tokens) if (!TOKENS[t]) throw new Error(`Unknown token "${t}". Reinpay spends ${Object.keys(TOKENS).join(", ")}; add others with reinpay token add.`);
   if (!/^[\w .'-]{2,40}$/.test(String(name || ""))) throw new Error("Payee name: 2-40 letters, digits, spaces, dots, dashes or apostrophes.");
   if (!isAddress(String(address || ""))) throw new Error(`"${address}" is not a valid 0x address.`);
   const a = getAddress(address);
   if (/^0x0{40}$/i.test(a)) throw new Error("Refusing the zero address.");
-  if (Object.values(TOKENS).some((t) => t.address && t.address === a)) throw new Error("That is a token contract. Tokens sent there are usually lost.");
+  const known = Object.values(TOKENS).find((t) => t.address && t.address === a);
+  if (known) throw new Error(`${a} is the contract of ${known.symbol}, not a wallet. Tokens sent to a token contract are usually stuck for good. Use the recipient's own address.`);
   const cfg = loadConfig();
   if (cfg.payees.some((p) => p.name.toLowerCase() === name.toLowerCase())) throw new Error(`A payee named "${name}" already exists.`);
   if (cfg.payees.some((p) => getAddress(p.address) === a)) throw new Error(`${a} is already on the list.`);
@@ -237,7 +241,8 @@ export function setPayee(name, patch) {
 export function setPayeeLimit(name, kind, token, amount) {
   const key = { daily: "daily", max: "maxPerPayment" }[kind];
   const sym = String(token || "").toUpperCase();
-  if (!key || !TOKENS[sym]) throw new Error("Usage: reinpay payee limit <name> <daily|max> <USDG|ETH> <amount|off>");
+  syncTokens();
+  if (!key || !TOKENS[sym]) throw new Error(`Usage: reinpay payee limit <name> <daily|max> <${Object.keys(TOKENS).join("|")}> <amount|off>`);
   const cfg = loadConfig();
   const p = findPayee(cfg.payees, name);
   if (!p) throw new Error(`No payee "${name}".`);
@@ -250,6 +255,53 @@ export function setPayeeLimit(name, kind, token, amount) {
   }
   saveConfig(cfg);
   return p;
+}
+
+// ---- extra tokens (owner only, from the CLI) ----
+const SOURCIFY = "https://sourcify.dev/server/v2/contract";
+
+/** Sourcify's verdict for a contract on Robinhood Chain: "exact_match", "match" or null. `f` is for tests. */
+export async function sourcifyMatch(address, f = globalThis.fetch) {
+  const res = await f(`${SOURCIFY}/${CHAIN_ID}/${getAddress(address)}`, { headers: { accept: "application/json" } });
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`Sourcify answered ${res.status}; try again later.`);
+  const j = await res.json();
+  return ["exact_match", "match"].includes(j.match) ? j.match : null;
+}
+
+/** Add an ERC-20 on Robinhood Chain. It must have code, answer like a token, and be verified on Sourcify. Spending stays off until the owner sets a daily budget for it. */
+export async function addToken(address, { fetch: f } = {}) {
+  if (!isAddress(String(address || ""))) throw new Error(`"${address}" is not a valid 0x address.`);
+  const a = getAddress(address);
+  const c = publicClient();
+  const code = await c.getCode({ address: a });
+  if (!code || code === "0x") throw new Error(`${a} has no contract code on Robinhood Chain mainnet.`);
+  const [sym, dec, name] = await Promise.all(["symbol", "decimals", "name"].map((fn) => c.readContract({ address: a, abi: erc20Abi, functionName: fn }).catch(() => null)));
+  if (sym == null || dec == null) throw new Error(`${a} does not answer like an ERC-20 token (symbol and decimals).`);
+  const symbol = String(sym).toUpperCase();
+  if (!/^[A-Z0-9]{1,11}$/.test(symbol)) throw new Error(`The token's symbol "${sym}" is not plain letters and digits; Reinpay will not guess a name for it.`);
+  if (!(Number(dec) >= 0 && Number(dec) <= 36)) throw new Error(`Unusual decimals (${dec}); refused.`);
+  syncTokens();
+  if (TOKENS[symbol]) throw new Error(`${symbol} is already a token Reinpay spends${TOKENS[symbol].address && TOKENS[symbol].address !== a ? ` (at ${TOKENS[symbol].address}). Two tokens with one symbol would be confusing; refused` : ""}.`);
+  const match = await sourcifyMatch(a, f);
+  if (!match) throw new Error(`${a} (${symbol}) is not verified on Sourcify for chain ${CHAIN_ID}. Reinpay only adds tokens whose source code is published and matched.`);
+  const cfg = loadConfig();
+  const t = { symbol, address: a, decimals: Number(dec), name: name ? String(name).slice(0, 60) : symbol, sourcify: match, addedAt: new Date().toISOString() };
+  cfg.tokens = [...(cfg.tokens || []).filter((x) => x.symbol !== symbol), t];
+  saveConfig(cfg);
+  syncTokens(cfg);
+  return t;
+}
+
+export function removeToken(symbol) {
+  const s = String(symbol || "").toUpperCase();
+  if (BUILTIN.includes(s)) throw new Error(`${s} is built in and cannot be removed. Set its daily budget to 0 to stop spending it.`);
+  const cfg = loadConfig();
+  if (!(cfg.tokens || []).some((t) => t.symbol === s)) throw new Error(`No added token ${s}.`);
+  cfg.tokens = cfg.tokens.filter((t) => t.symbol !== s);
+  saveConfig(cfg);
+  syncTokens(cfg);
+  return s;
 }
 
 export function removePayee(name) {

@@ -13,12 +13,14 @@ const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url),
 const HELP = `reinpay ${pkg.version} - a wallet for AI agents that only spends inside your rules (Robinhood Chain mainnet, chain id 4663)
 
   reinpay mcp                              Run the MCP server on stdio (your agent host starts this)
+  reinpay profiles                         List wallets on this computer (one per agent)
+  --profile=<name>                         Use that agent's wallet for any command, e.g. reinpay init --profile=research
   reinpay init [--import]                  Create (or import) the encrypted wallet. Terminal only.
   reinpay address                          Print the wallet address
   reinpay status                           Balances, budgets left today and the rules
   reinpay unlock | lock                    Store or remove the passphrase file the server signs with
   reinpay rules                            Show the rules
-  reinpay rule <name> <token> <amount>     Set daily | weekly | monthly | max | approve-above for USDG or ETH, e.g. reinpay rule daily USDG 50
+  reinpay rule <name> <token> <amount>     Set daily | weekly | monthly | max | approve-above for a token, e.g. reinpay rule daily USDG 50
                                            (weekly and monthly accept "off"; weeks start on Monday, local time)
   reinpay rule repeat-guard <minutes>      Hold repeats of the same payment for that long (0 turns it off)
   reinpay autosend <on|off>                Send payments that are inside every rule without asking (needs unlock)
@@ -28,10 +30,12 @@ const HELP = `reinpay ${pkg.version} - a wallet for AI agents that only spends i
   reinpay pending                          Payments waiting for you
   reinpay approve <RP-id>                  Check the rules again, simulate again, then sign and send
   reinpay reject <RP-id>                   Refuse a waiting payment
-  reinpay receipts [--status=sent] [--json]
+  reinpay receipts [--status=sent] [--json | --csv]
+  reinpay token add <0xaddress> | list | remove <SYMBOL>
+                                           Spend another ERC-20 (checked on-chain and on Sourcify first)
   reinpay notify telegram <bot-token> <chat-id> | webhook <https-url> | off | test
                                            Tell you when a payment waits for your approval
-  reinpay report [--days=7] [--json]       What was sent, waiting and blocked, per day, with top payees
+  reinpay report [--days=7] [--json | --csv]   What was sent, waiting and blocked, per day, with top payees
   reinpay export                           Show the private key. Terminal only.
   reinpay --version`;
 
@@ -63,10 +67,22 @@ function ask(q, { hidden = false } = {}) {
 const line = (r) => `${r.id}  ${r.status.padEnd(14)} ${String(r.amount).padStart(12)} ${r.token.padEnd(4)}  ${r.payee}${r.memo ? `  "${r.memo}"` : ""}\n        ${r.rule}: ${r.reason}${r.explorer ? `\n        ${r.explorer}` : ""}`;
 
 async function main() {
+  // --profile=<name> picks one agent's wallet (each profile has its own key, rules, payees and receipts).
+  if (opt("profile")) process.env.REINPAY_PROFILE = opt("profile");
   if (!cmd || cmd === "help" || cmd === "--help" || cmd === "-h") return console.log(HELP);
   if (cmd === "--version" || cmd === "-v" || cmd === "version") return console.log(pkg.version);
   if (cmd === "mcp") { const { runServer } = await import("../src/server.js"); return runServer(); }
 
+  if (cmd === "profiles") {
+    const { readdirSync, existsSync, readFileSync: rf } = await import("node:fs");
+    const { join } = await import("node:path");
+    const { ROOT } = await import("../src/config.js");
+    const addr = (dir) => { try { return JSON.parse(rf(join(dir, "keystore.json"), "utf8")).address || "?"; } catch { return "no wallet yet"; } };
+    const rows = [["default", addr(ROOT())]];
+    const pdir = join(ROOT(), "profiles");
+    if (existsSync(pdir)) for (const n of readdirSync(pdir).sort()) rows.push([n, addr(join(pdir, n))]);
+    return console.log(rows.map(([n, a]) => `${n.padEnd(20)} ${a}`).join("\n") + "\n\nUse one with --profile=<name>, e.g. reinpay mcp --profile=research");
+  }
   const K = await import("../src/keystore.js");
   const P = await import("../src/pay.js");
   const C = await import("../src/config.js");
@@ -104,7 +120,9 @@ async function main() {
       const key = { daily: "daily", weekly: "weekly", monthly: "monthly", max: "maxPerPayment", "approve-above": "approveAbove" }[name];
       const tok = String(a1 || "").toUpperCase();
       const off = ["weekly", "monthly"].includes(name) && String(a2).toLowerCase() === "off";
-      if (!key || !["USDG", "ETH"].includes(tok) || (!off && !/^\d+(\.\d+)?$/.test(String(a2 || "")))) throw new Error("Usage: reinpay rule <daily|weekly|monthly|max|approve-above> <USDG|ETH> <amount> (weekly and monthly also take off)");
+      const { syncTokens } = await import("../src/chain.js");
+      const known = Object.keys(syncTokens(cfg));
+      if (!key || !known.includes(tok) || (!off && !/^\d+(\.\d+)?$/.test(String(a2 || "")))) throw new Error(`Usage: reinpay rule <daily|weekly|monthly|max|approve-above> <${known.join("|")}> <amount> (weekly and monthly also take off)`);
       if (off) { cfg.rules[key] = { ...(cfg.rules[key] || {}) }; delete cfg.rules[key][tok]; }
       else cfg.rules[key] = { ...(cfg.rules[key] || {}), [tok]: a2 };
     }
@@ -167,11 +185,31 @@ async function main() {
   if (cmd === "report") {
     const { spendingReport, reportText } = await import("../src/report.js");
     const { allReceipts } = await import("../src/receipts.js");
+    (await import("../src/chain.js")).syncTokens();
     const rep = spendingReport(allReceipts(), { days: opt("days") || 7 });
+    if (flags.has("--csv")) return process.stdout.write((await import("../src/csv.js")).reportCSV(rep));
     return console.log(flags.has("--json") ? JSON.stringify(rep, null, 2) : reportText(rep));
+  }
+  if (cmd === "token") {
+    const [sub, arg] = pos;
+    const { syncTokens } = await import("../src/chain.js");
+    if (sub === "list" || !sub) return console.log(JSON.stringify(Object.values(syncTokens()), null, 2));
+    requireTTY("token " + sub);
+    if (sub === "add") {
+      const t = await P.addToken(arg);
+      return console.log(`Added ${t.symbol} (${t.name}) at ${t.address}, ${t.decimals} decimals, Sourcify ${t.sourcify}.\nIt cannot be spent until you set a daily budget: reinpay rule daily ${t.symbol} <amount>`);
+    }
+    if (sub === "remove") return console.log(`Removed ${P.removeToken(arg)}. Its receipts stay.`);
+    throw new Error("Usage: reinpay token <add <0xaddress>|list|remove <SYMBOL>>");
   }
   if (cmd === "receipts") {
     const list = P.listReceipts({ status: opt("status"), limit: 200 });
+    if (flags.has("--csv")) {
+      const { toCSV, RECEIPT_COLS } = await import("../src/csv.js");
+      const { allReceipts, view } = await import("../src/receipts.js");
+      const all = allReceipts().filter((r) => !opt("status") || r.status === opt("status")).map(view); // every receipt, oldest first
+      return process.stdout.write(toCSV(all, RECEIPT_COLS));
+    }
     return console.log(flags.has("--json") ? JSON.stringify(list, null, 2) : list.length ? list.map(line).join("\n") : "No receipts yet.");
   }
   console.error(`Unknown command "${cmd}".\n\n${HELP}`);

@@ -17,12 +17,12 @@ const READ = { readOnlyHint: true, openWorldHint: true };
 
 /** [name, title, description, inputSchema, annotations, handler] */
 export const TOOLS = [
-  ["wallet_status", "Wallet status", "The Reinpay wallet's address and ETH and USDG balances on Robinhood Chain mainnet, plus today's budget left per token and the rules.", {}, READ, () => walletStatus()],
+  ["wallet_status", "Wallet status", "The Reinpay wallet's address and its balances on Robinhood Chain mainnet (ETH, USDG and any token the owner added), plus today's budget left per token and the rules.", {}, READ, () => walletStatus()],
   ["get_rules", "Spending rules", "The owner's spending rules: daily budget and what is left today per token, max per payment, the approval line, the repeat guard, whether payments inside the rules are sent automatically, and the payees you may pay. Read this before asking for a payment.", {}, READ, () => rulesView()],
   ["request_payment", "Request a payment",
-    "Ask the wallet to pay one payee from the owner's list in USDG or ETH. The request is checked against the rules and simulated on mainnet. Decisions: 'blocked' (with the rule and reason), 'needs_approval' or 'ready' (waits for the owner), 'sending'/'sent' (only when the owner turned on autoSend and unlocked the wallet). You cannot approve a request. Do not split a payment to get under a limit, and do not repeat a request that is waiting or blocked.",
+    "Ask the wallet to pay one payee from the owner's list in USDG, ETH or another token the owner added. The request is checked against the rules and simulated on mainnet. Decisions: 'blocked' (with the rule and reason), 'needs_approval' or 'ready' (waits for the owner), 'sending'/'sent' (only when the owner turned on autoSend and unlocked the wallet). You cannot approve a request. Do not split a payment to get under a limit, and do not repeat a request that is waiting or blocked.",
     { payee: z.string().describe("Payee name exactly as get_rules lists it"), amount: z.string().describe("Amount as decimal text, e.g. \"12.5\""),
-      token: z.enum(["USDG", "ETH"]).optional().describe("Default USDG"), memo: z.string().max(200).describe("What the payment is for") },
+      token: z.string().max(11).optional().describe("A token symbol that get_rules lists (USDG, ETH, or one the owner added). Default USDG"), memo: z.string().max(200).describe("What the payment is for") },
     { readOnlyHint: false, destructiveHint: false, openWorldHint: true }, (a) => requestPayment(a, { by: "agent" })],
   ["get_receipt", "Receipt", "One receipt by id (RP-00001): status, the rule that decided, the simulation, and the transaction once sent.", { id: z.string() }, READ,
     (a) => { const r = getReceipt(a.id); if (!r) throw new Error(`No receipt ${a.id}.`); return view(r); }],
