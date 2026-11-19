@@ -33,6 +33,6 @@ export function updateReceipt(id, patch, note) {
 
 /** Public view: what the agent and the owner see. Prepared transaction data stays internal. */
 export function view(r) {
-  const { tx, ...rest } = r;
+  const { tx, _tx, ...rest } = r;
   return { ...rest, createdAt: new Date(r.createdAt).toISOString(), history: r.history.map((h) => ({ at: new Date(h.at).toISOString(), note: h.note })) };
 }

@@ -156,6 +156,24 @@ cfg.rules.autoSend = false; C.saveConfig(cfg);
   let e5 = ""; try { P.removeToken("USDG"); } catch (e) { e5 = e.message; }
   check("built-in tokens cannot be removed", /built in/.test(e5));
 }
+// 0.4.1: approve never signs data read back from receipts.json
+{
+  const { readFileSync, writeFileSync } = await import("node:fs");
+  const rp = C.paths().receipts;
+  const disk = JSON.parse(readFileSync(rp, "utf8"));
+  check("no raw transaction is stored in receipts.json", disk.receipts.every((x) => x.tx === undefined && x._tx === undefined));
+  const cT = C.loadConfig(); cT.rules.daily.ETH = "1"; cT.rules.weekly = {}; cT.rules.monthly = {}; C.saveConfig(cT);
+  const w = await rq("Test payee", "0.0011", "ETH", "tamper test");
+  check("the tamper-test payment waits for approval", w.status === "needs_approval", w.reason);
+  const db = JSON.parse(readFileSync(rp, "utf8"));
+  const rec = db.receipts.find((x) => x.id === w.id);
+  rec.payeeAddress = "0x000000000000000000000000000000000000bEEF";
+  rec.tx = { to: "0x000000000000000000000000000000000000bEEF", data: "0x", value: "1000000000000000000" };
+  writeFileSync(rp, JSON.stringify(db));
+  const ap2 = await P.approve(w.id, { passphrase: "throwaway-test-passphrase" });
+  check("a receipt edited to point at another address is refused at approval, nothing signed", ap2.status === "blocked" && ap2.rule === "payee list" && !ap2.txHash, ap2.reason);
+  cT.rules.daily.ETH = "0.005"; C.saveConfig(cT);
+}
 let threw = "";
 try { await P.approve(r8.id); } catch (e) { threw = e.message; }
 check("a blocked payment cannot be approved", /only waiting payments/.test(threw));

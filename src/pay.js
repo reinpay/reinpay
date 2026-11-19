@@ -74,14 +74,15 @@ export async function tokenAt(address) {
 
 const simView = (s, feeWei) => s && { ok: s.ok, block: s.block.toString(), gasUsed: s.gasUsed.toString(), estimatedFeeEth: feeWei != null ? formatEther(feeWei) : null, method: "eth_simulateV1" };
 
-async function sendNow(r, passphrase, opened) {
-  const account = opened || loadAccount(passphrase);
+// Signs only the transaction it is handed: one built a moment ago from the payee list and the amount, and the same one
+// that was just simulated. Nothing is ever read back from receipts.json to be signed.
+async function sendNow(r, tx, account) {
   if (getAddress(account.address) !== getAddress(r.wallet)) throw new Error("The keystore address changed since this payment was requested. Request it again.");
   updateReceipt(r.id, { status: "sending" }, "Signing and sending.");
   const w = createWalletClient({ account, chain: robinhoodChain, transport: transport() });
   let hash;
   try {
-    hash = await w.sendTransaction({ to: r.tx.to, data: r.tx.data, value: BigInt(r.tx.value) });
+    hash = await w.sendTransaction({ to: tx.to, data: tx.data, value: BigInt(tx.value) });
   } catch (e) {
     return updateReceipt(r.id, { status: "failed" }, `Not sent: ${e.shortMessage || e.message}`);
   }
@@ -112,12 +113,13 @@ export async function requestPayment({ payee, amount, token = "USDG", memo = "" 
     if (d.status === "blocked") return addReceipt({ ...base, status: "blocked", rule: d.rule, reason: d.reason });
     const ch = await check(from, symbol, p.address, amountRaw);
     if (ch.problem) return addReceipt({ ...base, status: "blocked", rule: "simulation", reason: `Simulated on mainnet: ${ch.problem}.`, simulation: simView(ch.sim) });
-    const tx = { to: ch.tx.to, data: ch.tx.data, value: ch.tx.value.toString() };
     const status = d.status === "needs_approval" ? "needs_approval" : cfg.rules.autoSend && isUnlocked() ? "sending" : "ready";
     const reason = status === "ready" ? `${d.reason} Waiting for the owner because autoSend is ${cfg.rules.autoSend ? "on but the wallet is locked" : "off"}.` : d.reason;
-    return addReceipt({ ...base, status, rule: d.rule, reason, simulation: simView(ch.sim, ch.feeWei), tx });
+    const rec = addReceipt({ ...base, status, rule: d.rule, reason, simulation: simView(ch.sim, ch.feeWei) });
+    if (status === "sending") rec._tx = ch.tx; // kept in memory only, never written to disk
+    return rec;
   });
-  if (r.status === "sending") return view(await sendNow(r));
+  if (r.status === "sending") return view(await sendNow(r, r._tx, loadAccount()));
   if (["needs_approval", "ready"].includes(r.status) && cfg.notify) {
     const n = await notifyOwner(r, { cfg });
     return view(updateReceipt(r.id, {}, n.ok ? `Owner notified (${n.detail}).` : `Owner notification failed (${n.detail}).`));
@@ -138,14 +140,16 @@ export async function approve(id, { passphrase } = {}) {
     if (!["needs_approval", "ready"].includes(r.status)) throw new Error(`${r.id} is ${r.status}; only waiting payments can be approved.`);
     const cfg = loadConfig();
     const p = findPayee(cfg.payees, r.payeeAddress);
+    if (!p || getAddress(p.address) !== getAddress(r.payeeAddress || "0x0000000000000000000000000000000000000000")) return { final: updateReceipt(r.id, { status: "blocked", rule: "payee list", reason: "This payee is no longer on your payee list." }, "Approval refused: payee not on the list.") };
     const d = decide({ rules: { ...cfg.rules, repeatGuardMinutes: 0, approveAbove: {} }, receipts: allReceipts(), request: { payee: p, token: r.token, amountRaw: BigInt(r.amountRaw) }, excludeId: r.id });
     if (d.status === "blocked") return { final: updateReceipt(r.id, { status: "blocked", rule: d.rule, reason: d.reason }, `Approval refused: ${d.reason}`) };
-    const ch = await check(r.wallet, r.token, r.payeeAddress, BigInt(r.amountRaw));
+    // Build the transaction fresh from the payee list and the amount, simulate exactly that, and sign exactly that.
+    const ch = await check(r.wallet, r.token, getAddress(p.address), BigInt(r.amountRaw));
     if (ch.problem) return { final: updateReceipt(r.id, { status: "blocked", rule: "simulation", reason: `Simulated again: ${ch.problem}.` }, "Approval refused by the second simulation.") };
-    return { go: updateReceipt(r.id, { status: "sending", simulation: simView(ch.sim, ch.feeWei) }, "Approved by the owner; simulated again.") };
+    return { go: updateReceipt(r.id, { status: "sending", simulation: simView(ch.sim, ch.feeWei) }, "Approved by the owner; simulated again."), tx: ch.tx };
   });
   if (done.final) return view(done.final);
-  return view(await sendNow(done.go, undefined, account));
+  return view(await sendNow(done.go, done.tx, account));
 }
 
 export function reject(id, why = "Rejected by the owner.") {

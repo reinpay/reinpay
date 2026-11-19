@@ -6,7 +6,7 @@ A wallet for AI agents that only spends inside your rules.
 
 Your agent can read its budget and ask for payments. You decide the rules: a daily budget per token, a max per payment, the payees it may pay, and the amount above which it has to ask you. Every payment is simulated on **Robinhood Chain mainnet** (chain id 4663) before anything is signed, and every request gets a receipt that names the rule that decided it.
 
-Version 0.4.0. USDG and ETH built in; add other verified ERC-20s. Works with any MCP host that runs a local command (Claude Code, Cursor, Codex, Windsurf, VS Code and others).
+Version 0.4.1. USDG and ETH built in; add other verified ERC-20s. Works with any MCP host that runs a local command (Claude Code, Cursor, Codex, Windsurf, VS Code and others).
 
 ## How a payment works
 
@@ -120,6 +120,24 @@ reinpay notify off
 ```
 
 The message has the receipt id, the amount, the payee, the rule that held it and the approve command. Nothing is approved from the message: approving stays in your terminal.
+
+## Security model
+
+Reinpay is built for agents that reach the wallet **only through its MCP tools**. Over MCP an agent can read and ask; it cannot approve, change rules, add payees or read the key.
+
+What Reinpay does not protect against: an agent that can run **arbitrary shell commands as your own user**. Such an agent can read anything you can read, including `~/.reinpay`. In particular:
+
+- while the wallet is unlocked, the passphrase sits in `~/.reinpay/passphrase`, so the keystore plus that file give the key;
+- `config.json` (rules, payees, autosend) has no integrity check, so it can be edited directly;
+- the terminal-only commands check for a real terminal (TTY), and a tool that fakes one can get past that check.
+
+So, if your agent has shell access:
+
+- run the agent as a **different OS user** that cannot read your `~/.reinpay`, or in a container without your home folder;
+- keep the wallet **locked** (`reinpay lock`) and `autosend` **off**, which is the default; then every payment needs you to type your passphrase;
+- fund the wallet with only what you are willing to lose.
+
+Approvals never sign data read back from disk: `reinpay approve` rebuilds the transaction from the payee list and the amount, simulates it, and signs that same transaction.
 
 ## Where things are kept
 

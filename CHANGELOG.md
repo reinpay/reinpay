@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.1 (unreleased): security fix
+
+- Fixed: `reinpay approve` signed the raw transaction stored in `receipts.json`, while the second simulation used a transaction built fresh from the payee list and the amount. Anything able to edit `receipts.json` could have made the owner approve one payment and sign another. Approve now builds the transaction from the payee list and the amount, simulates exactly that transaction, and signs exactly that transaction. Raw transactions are no longer written to `receipts.json` at all, and a receipt whose payee address is not on the payee list is refused. Reported publicly; thank you.
+- README: a "Security model" section that states plainly what Reinpay protects against and what it does not (an agent that can run arbitrary shell commands as your user).
+- Tests: 56 live mainnet checks, including a receipt edited to point at another address being refused with nothing signed.
+
 ## 0.4.0 (unreleased)
 
 - One wallet per agent: `--profile=<name>` on any command (`reinpay init --profile=research`, `reinpay mcp --profile=research`). Each profile has its own key, rules, payees, receipts and spend lock in `~/.reinpay/profiles/<name>`; the default stays in `~/.reinpay`. `reinpay profiles` lists them. Names are 1-32 lowercase letters, digits or dashes.
