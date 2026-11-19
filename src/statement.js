@@ -64,11 +64,20 @@ export async function checkStatement(st, { client } = {}) {
 }
 
 export function statementCheckText(st, res) {
-  const lines = [`Reinpay statement ${st.from} to ${st.to}, wallet ${st.wallet}, ${st.count} payment${st.count === 1 ? "" : "s"}`, ""];
+  const lines = [st.purpose === "receipt" ? `Reinpay receipt ${st.payments?.[0]?.id} on ${st.from}, wallet ${st.wallet}: ${st.payments?.[0]?.amount} ${st.payments?.[0]?.token} to ${st.payments?.[0]?.payee}` : `Reinpay statement ${st.from} to ${st.to}, wallet ${st.wallet}, ${st.count} payment${st.count === 1 ? "" : "s"}`, ""];
   lines.push(`${res.signature.ok ? "✓" : "✕"} signature: ${res.signature.reason}`);
   lines.push(`${res.chainOk ? "✓" : "✕"} chain: ${st.chainId}`);
   lines.push(`${res.countOk ? "✓" : "✕"} count: ${(st.payments || []).length} listed, ${st.count} stated`);
   for (const p of res.payments) lines.push(`${p.ok ? "✓" : "✕"} ${p.id}${p.ok ? " matches the chain" : `: ${p.reason || p.failed.join(", ")}`}`);
-  lines.push("", res.ok ? "Everything checks out." : "Something does not match. Do not rely on this statement.");
+  lines.push("", res.ok ? "Everything checks out." : `Something does not match. Do not rely on this ${st.purpose === "receipt" ? "receipt" : "statement"}.`);
   return lines.join("\n");
+}
+
+/** A proof of one sent payment, to hand to the payee or anyone else: a one-payment statement marked as a receipt. */
+export function receiptProof(r, { wallet, now = Date.now() } = {}) {
+  if (!r) throw new Error("No such receipt.");
+  if (r.status !== "sent" || !r.txHash) throw new Error(`${r.id} is ${r.status}; only sent payments can be shared.`);
+  const day = localDay(r.createdAt);
+  const st = buildStatement([r], { wallet, days: 366, now: Math.max(now, r.createdAt) });
+  return { ...st, purpose: "receipt", from: day, to: day };
 }

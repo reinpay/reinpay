@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.20.0 (unreleased): the agent can explain
+
+- New read-only MCP tools `spending_report` and `review_rules` (eleven tools in all, ten in read-only mode). The agent can report spending from the receipts and pass rule suggestions to the owner; it still cannot change a rule.
+- Tests: the MCP tool counts and 2 new live checks over stdio. All passing. No transaction is signed or sent.
+
+## 0.19.0 (unreleased): review
+
+- `reinpay review [--days=30] [--json]`: suggestions from your own receipts, safety first, each with the command to run. Read-only and local.
+- Tests: 11 checks offline. All passing.
+
+## 0.18.0 (unreleased): sandbox
+
+- `reinpay sandbox`: a no-money tour through the real rules and real mainnet simulations, with a throwaway wallet whose pretend ETH exists only inside the simulation. Runs in its own temporary folder, restores the environment, deletes the folder.
+- Tests: 2 new live mainnet checks. All passing. No transaction is signed or sent.
+
+## 0.17.0 (unreleased): shared receipts
+
+- `reinpay share <RP-id> [--out=file.json]`: a signed proof of one sent payment (a one-payment statement marked `purpose: "receipt"`, so it cannot be passed off as a full statement). `reinpay share check <file>` checks the signature and the payment on the chain.
+- Tests: 7 checks offline. All passing.
+
+## 0.16.0 (unreleased): payee proof
+
+- `reinpay payee challenge <payee>` and `reinpay payee prove <payee> <0xsignature>`: a payee proves it controls its address by signing a message that names the payee, its address and your wallet. The proof is checked with signature recovery and stored on the payee.
+- `reinpay rule require-proven <on|off>`: payments to unproven payees wait for the owner (rule `unproven payee`). Contract payees are not held by it. `get_rules` shows which payees are proven.
+- Tests: 11 checks offline. All passing.
+
 ## 0.15.0 (unreleased): limits in dollars
 
 - `reinpay rule usd max <amount|off>` and `reinpay rule usd daily <amount|off>`: a cap per payment and a daily budget in dollars across USDG and ETH (rules `usd max`, `usd daily budget`).

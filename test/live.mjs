@@ -197,7 +197,7 @@ const { StdioClientTransport } = await import("@modelcontextprotocol/sdk/client/
 const mcp = new Client({ name: "reinpay-live-test", version: "0.0.0" });
 await mcp.connect(new StdioClientTransport({ command: process.execPath, args: [fileURLToPath(new URL("../bin/reinpay.js", import.meta.url)), "mcp"], env: { ...process.env, REINPAY_HOME: home } }));
 const names = (await mcp.listTools()).tools.map((t) => t.name).sort();
-check(`the agent gets 9 tools (${names.join(", ")})`, names.join() === "check_payment,freeze_wallet,get_receipt,get_rules,list_receipts,read_payment_link,request_payment,verify_receipt,wallet_status");
+check(`the agent gets 11 tools (${names.join(", ")})`, names.join() === "check_payment,freeze_wallet,get_receipt,get_rules,list_receipts,read_payment_link,request_payment,review_rules,spending_report,verify_receipt,wallet_status");
 check("no tool can approve, reject or change rules or payees", !names.some((n) => /approve|reject|rule_set|payee|unlock|autosend/.test(n)));
 const call = async (name, args = {}) => { const r = await mcp.callTool({ name, arguments: args }); return { err: !!r.isError, text: r.content.map((x) => x.text).join("") }; };
 const rules = JSON.parse((await call("get_rules")).text);
@@ -214,6 +214,10 @@ const list = JSON.parse((await call("list_receipts", { limit: 5 })).text);
 check("list_receipts returns the newest first", list.length === 5 && list[0].id === m2.id);
 const one2 = JSON.parse((await call("get_receipt", { id: r1.id })).text);
 check("get_receipt shows the history of an approval that was refused", one2.history.some((h) => /Approval refused/.test(h.note)));
+const spr = JSON.parse((await call("spending_report", { days: 1 })).text);
+check("spending_report over MCP: today's requests per token", spr.days === 1 && !!spr.totals.ETH, JSON.stringify(spr.totals.ETH));
+const rvw = JSON.parse((await call("review_rules", {})).text);
+check("review_rules over MCP: returns suggestions, each with a command", Array.isArray(rvw) && rvw.every((x) => x.fix && x.title), `${rvw.length} suggestions`);
 const mv = JSON.parse((await call("verify_receipt", { id: r1.id })).text);
 check("verify_receipt over MCP: a receipt that was never sent has nothing to check", mv.ok === false && /nothing was sent/.test(mv.reason));
 const cp = JSON.parse((await call("check_payment", { payee: "Test payee", amount: "0.0001", token: "ETH" })).text);
@@ -277,7 +281,7 @@ check("statement check: signed by its wallet, but claiming someone else's paymen
 const ro = new Client({ name: "reinpay-live-test-ro", version: "0.0.0" });
 await ro.connect(new StdioClientTransport({ command: process.execPath, args: [fileURLToPath(new URL("../bin/reinpay.js", import.meta.url)), "mcp", "--read-only"], env: { ...process.env, REINPAY_HOME: home } }));
 const roNames = (await ro.listTools()).tools.map((t) => t.name).sort();
-check(`read-only MCP: ${roNames.length} tools, no request_payment`, roNames.length === 8 && !roNames.includes("request_payment"), roNames.join(", "));
+check(`read-only MCP: ${roNames.length} tools, no request_payment`, roNames.length === 10 && !roNames.includes("request_payment"), roNames.join(", "));
 const roTry = await ro.callTool({ name: "request_payment", arguments: { payee: "Test payee", amount: "0.0001", token: "ETH", memo: "x" } }).catch((e) => ({ isError: true, content: [{ text: e.message }] }));
 check("read-only MCP: asking for a payment is refused", !!roTry.isError);
 await ro.close();
@@ -338,6 +342,13 @@ check("usd max 0.5: 0.0004 ETH (about 0.72 USD) is blocked, with its value", ub.
 const uok = await rq("Test payee", "0.0001", "ETH", "usd test");
 check("usd max 0.5: 0.0001 ETH (about 0.18 USD) passes the USD rule and gets its value on the receipt", uok.rule !== "usd max" && uok.rule !== "usd price" && Number(uok.usdValue) > 0, `${uok.rule}: ${uok.usdValue} USD`);
 { const c0 = C.loadConfig(); delete c0.rules.usd; C.saveConfig(c0); }
+
+// ---- 0.18: the sandbox, on mainnet, in its own folder ----
+{ const homeBefore = process.env.REINPAY_HOME;
+  const SB = await import("../src/sandbox.js");
+  const sb = await SB.runSandbox({ log: () => {} });
+  check("sandbox: five requests, real rules, real simulation: ready, repeat, approval line, max, payee list", sb.map((r) => r.rule).join() === "within rules,repeat guard,approval line,max per payment,payee list" && !!sb[0].simulation?.block, sb.map((r) => r.status).join());
+  check("sandbox: puts REINPAY_HOME back and does not touch the test wallet", process.env.REINPAY_HOME === homeBefore && C.loadConfig().payees.some((p) => p.name === "Test payee")); }
 
 console.log(`\n${pass} passed, ${fail} failed. No transaction was signed or sent.`);
 process.exit(fail ? 1 : 0);

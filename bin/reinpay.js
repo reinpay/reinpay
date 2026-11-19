@@ -12,6 +12,7 @@ const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url),
 
 const HELP = `reinpay ${pkg.version} - a wallet for AI agents that only spends inside your rules (Robinhood Chain mainnet, chain id 4663)
 
+  reinpay sandbox                          Try Reinpay with no money: real rules, real mainnet simulation, pretend balance
   reinpay mcp [--read-only]                Run the MCP server on stdio (your agent host starts this); --read-only leaves out request_payment
   reinpay profiles [--status]              List wallets on this computer (one per agent); --status: today's spend, waiting, frozen
   --profile=<name>                         Use that agent's wallet for any command, e.g. reinpay init --profile=research
@@ -34,6 +35,9 @@ const HELP = `reinpay ${pkg.version} - a wallet for AI agents that only spends i
   reinpay rule per-hour <count|0>          At most this many payments sent or waiting in any hour
   reinpay rule category <name> daily <token> <amount|off>   A daily budget for every payee in a category
   reinpay payee category <payee> <name|off>    Put a payee in a category (e.g. compute, data, api)
+  reinpay payee challenge <payee>          The message the payee signs to prove they control their address
+  reinpay payee prove <payee> <0xsignature>    Record the payee's proof
+  reinpay rule require-proven <on|off>     Payments to payees without a proof wait for you
   reinpay grant <token> <amount> --for=2h [--note=...]   Extra budget for a while, on top of the daily budget
   reinpay grant list | clear               Show or remove grants
   reinpay check <payee> <amount> [token]   Dry run: what would happen to this payment now (nothing recorded or signed)
@@ -53,6 +57,8 @@ const HELP = `reinpay ${pkg.version} - a wallet for AI agents that only spends i
   reinpay verify <RP-id> | --all [--json]  Read sent payments back from the chain and check them against their receipts
   reinpay statement [--days=30] [--out=file.json]   A spending statement signed with your wallet key
   reinpay statement check <file.json>      Check anyone's statement: the signature, then every payment on the chain
+  reinpay share <RP-id> [--out=file.json]  A signed proof of one sent payment, for the payee or anyone
+  reinpay share check <file.json>          Check a shared receipt: the signature, then the payment on the chain
   reinpay schedule add <payee> <amount> <token> <daily|weekly|monthly> [--start=2026-12-01T09:00] [--memo=...]
   reinpay schedule list | remove <id> | pause <id> | resume <id>
   reinpay schedule run                     Ask for every payment that is due (put this on cron); rules still apply
@@ -61,6 +67,7 @@ const HELP = `reinpay ${pkg.version} - a wallet for AI agents that only spends i
   reinpay digest [--days=1] [--dry] [--all]        Send a short spending summary to your Telegram or webhook (for a daily schedule)
   reinpay backup [--out=file.json]         Everything needed to move this wallet: key (still encrypted), rules, payees, receipts
   reinpay restore <file.json>              Restore a backup into an empty wallet or profile. Terminal only.
+  reinpay review [--days=30] [--json]      Suggestions for your rules from your own receipts (changes nothing)
   reinpay doctor [--json]                  Check this computer's setup: Node, RPC, chain, wallet, seal, unlock, gas money, payees, budgets
   reinpay token add <0xaddress> | list | remove <SYMBOL>
                                            Spend another ERC-20 (checked on-chain and on Sourcify first)
@@ -103,6 +110,7 @@ async function main() {
   if (opt("profile")) process.env.REINPAY_PROFILE = opt("profile");
   if (!cmd || cmd === "help" || cmd === "--help" || cmd === "-h") return console.log(HELP);
   if (cmd === "--version" || cmd === "-v" || cmd === "version") return console.log(pkg.version);
+  if (cmd === "sandbox") { await (await import("../src/sandbox.js")).runSandbox(); return; }
   if (cmd === "mcp") { const { runServer } = await import("../src/server.js"); return runServer({ readOnly: flags.has("--read-only") }); }
 
   if (cmd === "profiles" && flags.has("--status")) {
@@ -197,7 +205,10 @@ async function main() {
     requireTTY("rule");
     const cfg = C.loadConfig();
     const [name, a1, a2] = pos;
-    if (name === "usd") {
+    if (name === "require-proven") {
+      if (!["on", "off"].includes(a1)) throw new Error("Usage: reinpay rule require-proven <on|off>");
+      if (a1 === "on") cfg.rules.requireProven = true; else delete cfg.rules.requireProven;
+    } else if (name === "usd") {
       const k = { max: "max", daily: "daily" }[a1];
       if (!k || !(a2 === "off" || /^\d+(\.\d+)?$/.test(String(a2 || "")))) throw new Error("Usage: reinpay rule usd <max|daily> <amount|off>");
       const u = { ...(cfg.rules.usd || {}) };
@@ -307,6 +318,19 @@ async function main() {
       return console.log(`Added ${p.name} ${p.address}${p.expiresAt ? `, until ${p.expiresAt}` : ""}${p.isContract ? " (a contract, not a personal wallet: make sure it can receive tokens)" : ""}.`);
     }
     if (sub === "remove") return console.log(`Removed ${P.removePayee(name).name}.`);
+    if (sub === "challenge") {
+      const { proofMessage } = await import("../src/proof.js"); const { findPayee } = await import("../src/rules.js");
+      const p = findPayee(C.loadConfig().payees, name); if (!p) throw new Error(`No payee "${name}".`);
+      return console.log(`Send this text to ${p.name}. They sign it as a message with the wallet at ${p.address} (any wallet's "sign message" works) and send you the signature:\n\n${proofMessage(p, P.requireWallet())}\n\nThen: reinpay payee prove "${p.name}" 0x…`);
+    }
+    if (sub === "prove") {
+      const { checkProof } = await import("../src/proof.js"); const { findPayee } = await import("../src/rules.js");
+      const p = findPayee(C.loadConfig().payees, name); if (!p) throw new Error(`No payee "${name}".`);
+      const r = await checkProof(p, P.requireWallet(), pos[2]);
+      if (!r.ok) throw new Error(`Not recorded: ${r.reason}.`);
+      P.setPayee(p.name, { proof: { sig: pos[2], at: new Date().toISOString() } });
+      return console.log(`${p.name} proved it controls ${p.address} (${r.reason}).`);
+    }
     if (sub === "category") {
       const cat = pos[2], { CATEGORY_RE } = await import("../src/rules.js");
       if (cat !== "off" && !CATEGORY_RE.test(String(cat || ""))) throw new Error("Usage: reinpay payee category <payee> <name|off>  (name: lowercase letters, digits, dashes)");
@@ -324,7 +348,7 @@ async function main() {
       const p = P.setPayeeLimit(name, kind, tok, amount);
       return console.log(`${p.name}: daily ${JSON.stringify(p.daily || {})}, max per payment ${JSON.stringify(p.maxPerPayment || {})}.`);
     }
-    throw new Error("Usage: reinpay payee <add|list|remove|off|on|limit|until|category|export|import>");
+    throw new Error("Usage: reinpay payee <add|list|remove|off|on|limit|until|category|challenge|prove|export|import>");
   }
   if (cmd === "pending") {
     P.expireStale(C.loadConfig().rules);
@@ -504,7 +528,21 @@ async function main() {
     console.log(p.pools.map((x) => `  pool ${x.pool}: ${x.price ?? "no answer"}`).join("\n"));
     return console.log(p.price === null ? `No price: ${p.reason}. Payments that need one are blocked while USD rules are on.` : `ETH = ${p.price.toFixed(2)} USDG (average of two pools, ${((Math.abs(p.pools[0].price - p.pools[1].price) / Math.min(p.pools[0].price, p.pools[1].price)) * 100).toFixed(3)}% apart; refused above 2%).`);
   }
-  if (cmd === "statement") {
+  if (cmd === "share") {
+    const S = await import("../src/statement.js");
+    if (pos[0] !== "check") {
+      const { getReceipt } = await import("../src/receipts.js");
+      const { writeFileSync: wf, existsSync: ex } = await import("node:fs");
+      const st = S.receiptProof(getReceipt(pos[0] || ""), { wallet: P.requireWallet() });
+      if (!K.isUnlocked()) requireTTY("share");
+      const signed = await S.signStatement(st, K.loadAccount(K.isUnlocked() ? undefined : await ask("Passphrase to sign the receipt (hidden): ", { hidden: true })));
+      const out = opt("out") || `reinpay-receipt-${st.payments[0].id}.json`;
+      if (ex(out) && !flags.has("--force")) throw new Error(`${out} already exists. Use --out=<file> or --force.`);
+      wf(out, JSON.stringify(signed, null, 2) + "\n");
+      return console.log(`Wrote ${out}: ${st.payments[0].amount} ${st.payments[0].token} to ${st.payments[0].payee}, tx ${st.payments[0].txHash}, signed by ${signed.signature.by}.\nWhoever gets it can check it with: reinpay share check ${out}`);
+    }
+  }
+  if (cmd === "statement" || (cmd === "share" && pos[0] === "check")) {
     const S = await import("../src/statement.js");
     const { readFileSync: rf, writeFileSync: wf, existsSync: ex } = await import("node:fs");
     if (pos[0] === "check") {
@@ -543,6 +581,13 @@ async function main() {
     if (!n.ok) process.exitCode = 1;
     return;
   }
+  if (cmd === "review") {
+    const { review, reviewText } = await import("../src/review.js");
+    const { allReceipts } = await import("../src/receipts.js");
+    const cfg = C.loadConfig(); (await import("../src/chain.js")).syncTokens(cfg);
+    const list = review(cfg, allReceipts(), { days: Number(opt("days")) || 30 });
+    return console.log(flags.has("--json") ? JSON.stringify(list, null, 2) : reviewText(list));
+  }
   if (cmd === "doctor") {
     const { doctor, doctorText } = await import("../src/doctor.js");
     const checks = await doctor();
@@ -565,7 +610,7 @@ async function main() {
 }
 
 // Commands that change rules, payees, tokens or notifications seal the config with the wallet key afterwards.
-const MUTATING = ["rule", "autosend"].includes(cmd) || (cmd === "schedule" && ["add", "remove", "pause", "resume"].includes(pos[0])) || (cmd === "grant" && pos[0] && pos[0] !== "list") || (cmd === "notify" && pos[0] !== "test") || (cmd === "payee" && ["add", "remove", "off", "on", "limit", "until", "import", "category"].includes(pos[0])) || (cmd === "token" && ["add", "remove"].includes(pos[0]));
+const MUTATING = ["rule", "autosend"].includes(cmd) || (cmd === "schedule" && ["add", "remove", "pause", "resume"].includes(pos[0])) || (cmd === "grant" && pos[0] && pos[0] !== "list") || (cmd === "notify" && pos[0] !== "test") || (cmd === "payee" && ["add", "remove", "off", "on", "limit", "until", "import", "category", "prove"].includes(pos[0])) || (cmd === "token" && ["add", "remove"].includes(pos[0]));
 async function reseal(passphrase) {
   const K = await import("../src/keystore.js"), C = await import("../src/config.js"), { sealConfig } = await import("../src/seal.js");
   const pass = passphrase ?? (K.isUnlocked() ? undefined : await ask("Passphrase to seal your rules (hidden): ", { hidden: true }));

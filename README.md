@@ -166,6 +166,27 @@ All three are off until you set them.
 
 Address poisoning scams send you dust from an address that starts and ends like one you already pay, hoping you copy it from your history. `reinpay payee add` refuses a new address whose first and last 4 characters match a payee you already have, or your own wallet, and shows both side by side. If you checked it with the payee and it is right, type the new address again in full to add it anyway. `reinpay doctor` keeps pointing at such pairs.
 
+
+### Payee proof
+
+`reinpay payee challenge <payee>` prints a short text that names the payee, its address and your wallet. The payee signs it as a message with that address (any wallet's "sign message" works; Reinpay never sees their key) and sends you the signature. `reinpay payee prove <payee> <0xsignature>` checks that the signature really comes from the payee's address and records it. With `reinpay rule require-proven on`, payments to payees without a proof wait for you (rule `unproven payee`). Contract payees cannot sign, so they are not held by this rule. A proof is tied to your wallet and the payee's name, so it is never copied into shared payee lists.
+
+### Shared receipts
+
+`reinpay share <RP-id> [--out=file.json]` writes a proof of one sent payment, signed with your wallet key: payee, amount, token, transaction. Send it to the payee, a client or an accountant. `reinpay share check <file>` needs no wallet: it confirms your wallet signed it, that nothing in it was changed, and reads the payment back from Robinhood Chain. Only sent payments can be shared.
+
+### Sandbox
+
+`reinpay sandbox` is a tour with no money and no setup. It makes a throwaway wallet in a temporary folder, gives it a pretend 1 ETH that exists only inside the simulation and the balance read, and sends five requests through the real rules and real `eth_simulateV1` calls on Robinhood Chain mainnet: one inside the rules, a repeat, one above the approval line, one above the max, and a payee that is not on the list. You see each decision and its reason. Nothing is signed or sent, your own wallet is not touched, and the folder is deleted at the end.
+
+### Review
+
+`reinpay review [--days=30]` reads your own receipts and suggests changes, each with the command to make it. It flags payees not paid in 30 days, a daily budget that keeps blocking requests or is far bigger than what is used (with a smaller number), an agent asking for payees that are not on the list, payments left waiting for more than a day, and missing safety switches (notifications, the circuit breaker, a per-hour cap and the first-payment rule when autosend is on). It is local and read-only: nothing is changed.
+
+### Tools that help the agent help you
+
+Two more read-only MCP tools: `spending_report` (sent, waiting and blocked per day and token, top payees, what blocked most) lets an agent answer "what did you spend this week?" from the receipts instead of guessing, and `review_rules` gives it the same suggestions as `reinpay review`, so it can pass them on to you with the commands to run. Neither can change anything, and both are available with `reinpay mcp --read-only`.
+
 ## Tools for the agent
 
 | Tool | What it does |
@@ -177,6 +198,8 @@ Address poisoning scams send you dust from an address that starts and ends like 
 | `list_receipts` | Recent receipts, optionally by status |
 | `verify_receipt` | Read a sent payment back from the chain and check it against its receipt |
 | `read_payment_link` | Read an ethereum: payment link: who, how much, and whether the payee is on the list. Pays nothing |
+| `spending_report` | Sent, waiting and blocked per day and token, top payees, what blocked most |
+| `review_rules` | Suggestions for the owner's rules, each with the command to run |
 | `check_payment` | Dry run: what would happen to a payment now, without recording anything |
 | `freeze_wallet` | Stop every payment until the owner unfreezes it (the agent can freeze, never unfreeze) |
 
@@ -271,7 +294,7 @@ The repeat guard is 10 minutes, and `autosend` is off. A token with no daily bud
 npm test
 ```
 
-`test/rules.test.mjs` checks every rule offline, `test/lock.test.mjs` the spend lock (including two processes), `test/report.test.mjs` the spending report, `test/notify.test.mjs` the owner notifications, `test/csv.test.mjs` the CSV export and `test/profile.test.mjs` the profiles, `test/seal.test.mjs` the config seal and unlock, `test/guard.test.mjs` the lookalike guard, `test/verify.test.mjs` the on-chain receipt check and `test/doctor.test.mjs` the checkup and `test/freeze.test.mjs` the freeze, the circuit breaker and expiring payees, `test/paper.test.mjs` statements, the first-payment rule and the digest, `test/plan.test.mjs` grants, dry runs and backup/restore, `test/share.test.mjs` shared payee lists, signed webhooks and read-only MCP, `test/smart.test.mjs` category budgets, payment hours and the per-hour cap, `test/bills.test.mjs` payment links, schedules and budget alerts, `test/failclosed.test.mjs` the token-contract check when the chain cannot be read, `test/approvals.test.mjs` the memo rule and expiring requests, `test/fleet.test.mjs` the view across profiles, and `test/usd.test.mjs` the two-pool price and the dollar limits. `test/live.mjs` runs on mainnet:
+`test/rules.test.mjs` checks every rule offline, `test/lock.test.mjs` the spend lock (including two processes), `test/report.test.mjs` the spending report, `test/notify.test.mjs` the owner notifications, `test/csv.test.mjs` the CSV export and `test/profile.test.mjs` the profiles, `test/seal.test.mjs` the config seal and unlock, `test/guard.test.mjs` the lookalike guard, `test/verify.test.mjs` the on-chain receipt check and `test/doctor.test.mjs` the checkup and `test/freeze.test.mjs` the freeze, the circuit breaker and expiring payees, `test/paper.test.mjs` statements, the first-payment rule and the digest, `test/plan.test.mjs` grants, dry runs and backup/restore, `test/share.test.mjs` shared payee lists, signed webhooks and read-only MCP, `test/smart.test.mjs` category budgets, payment hours and the per-hour cap, `test/bills.test.mjs` payment links, schedules and budget alerts, `test/failclosed.test.mjs` the token-contract check when the chain cannot be read, `test/approvals.test.mjs` the memo rule and expiring requests, `test/fleet.test.mjs` the view across profiles, and `test/usd.test.mjs` the two-pool price and the dollar limits. `test/proof.test.mjs` payee proofs. `test/sharereceipt.test.mjs` shared receipts.  `test/review.test.mjs` the rule review.  `test/live.mjs` runs on mainnet:
 
 - USDG transfer simulations from a public holder, and tampered ones that must be refused;
 - the full flow with a throwaway wallet that has a pretend ETH balance only inside the simulation;

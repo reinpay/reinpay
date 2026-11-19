@@ -9,6 +9,10 @@ import { getReceipt, view } from "./receipts.js";
 import { verifyReceipt } from "./verify.js";
 import { freeze, frozen } from "./freeze.js";
 import { readLink } from "./paylink.js";
+import { spendingReport } from "./report.js";
+import { review } from "./review.js";
+import { allReceipts } from "./receipts.js";
+import { syncTokens } from "./chain.js";
 import { loadConfig } from "./config.js";
 
 const VERSION = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
@@ -32,6 +36,10 @@ export const TOOLS = [
     { payee: z.string().describe("Payee name exactly as get_rules lists it"), amount: z.string().describe("Amount as decimal text"), token: z.string().max(11).optional().describe("Token symbol, default USDG"), memo: z.string().max(200).optional().describe("The memo you would send, so the memo rule is checked too") }, READ, (a) => previewPayment(a)],
   ["read_payment_link", "Read a payment link", "Read an ethereum: payment link (EIP-681) someone gave you: who it pays, how much, which token, and whether that payee is on the owner's list. It pays nothing. If it is on the list, call request_payment with the payee name it returns.",
     { link: z.string().max(400).describe("The ethereum:0x… link") }, READ, (a) => readLink(a.link, loadConfig())],
+  ["spending_report", "Spending report", "What this wallet sent, what is waiting and what was blocked, per day and token, with the top payees and the rules that blocked most. Use it to answer the user's questions about spending instead of guessing.",
+    { days: z.number().int().min(1).max(90).optional().describe("How many days back, today included. Default 7") }, READ, (a) => { syncTokens(); return spendingReport(allReceipts(), { days: a.days || 7 }); }],
+  ["review_rules", "Rule suggestions", "Suggestions for the owner's rules, from the receipts: unused payees, budgets that block often or are far too big, requests to strangers, payments left waiting, missing safety switches. You cannot change rules: pass the suggestions and their commands to the user.",
+    { days: z.number().int().min(7).max(90).optional() }, READ, (a) => { const cfg = loadConfig(); syncTokens(cfg); return review(cfg, allReceipts(), { days: a.days || 30 }); }],
   ["get_receipt", "Receipt", "One receipt by id (RP-00001): status, the rule that decided, the simulation, and the transaction once sent.", { id: z.string() }, READ,
     (a) => { const r = getReceipt(a.id); if (!r) throw new Error(`No receipt ${a.id}.`); return view(r); }],
   ["verify_receipt", "Verify a receipt on-chain", "Read a sent payment back from Robinhood Chain mainnet and check it against its receipt: confirmed and succeeded, sent from this wallet, to the payee, the exact amount and token. Use it before telling the user a payment arrived.", { id: z.string() }, READ,
@@ -44,7 +52,7 @@ export const TOOLS = [
 ];
 
 /** Tools that change nothing but the freeze. request_payment is the only tool left out in read-only mode. */
-export const READ_ONLY_TOOLS = ["wallet_status", "get_rules", "check_payment", "read_payment_link", "get_receipt", "verify_receipt", "list_receipts", "freeze_wallet"];
+export const READ_ONLY_TOOLS = ["wallet_status", "get_rules", "check_payment", "read_payment_link", "spending_report", "review_rules", "get_receipt", "verify_receipt", "list_receipts", "freeze_wallet"];
 
 export function buildServer({ readOnly = false } = {}) {
   const s = new McpServer({ name: "reinpay", version: VERSION }, {

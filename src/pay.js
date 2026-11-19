@@ -286,6 +286,7 @@ export function rulesView(now = Date.now()) {
   return {
     frozen: frozen(), circuitBreaker: breakerOf(cfg.rules) ? `freezes after ${breakerOf(cfg.rules).count} blocked requests in ${breakerOf(cfg.rules).minutes} minutes` : "off",
     firstPaymentNeedsOwner: cfg.rules.firstPayment === "ask",
+    ...(cfg.rules.requireProven ? { unprovenPayeesNeedOwner: true } : {}),
     ...(usdRules(cfg.rules) ? { usdRules: { ...(cfg.rules.usd.max != null ? { maxPerPayment: `${cfg.rules.usd.max} USD` } : {}), ...(cfg.rules.usd.daily != null ? { dailyAcrossTokens: `${cfg.rules.usd.daily} USD` } : {}), priceSource: "two WETH/USDG pools on Robinhood Chain; payments in other tokens are blocked while USD rules are on" } } : {}),
     ...(cfg.rules.memoMin ? { memoRequired: `at least ${cfg.rules.memoMin} characters saying what the payment is for` } : {}),
     ...(cfg.rules.expireAfterMinutes ? { waitingPaymentsExpireAfterMinutes: Number(cfg.rules.expireAfterMinutes) } : {}),
@@ -304,7 +305,7 @@ export function rulesView(now = Date.now()) {
         const { spent, held } = totals(allReceipts(), t, now, p.address);
         lim[t] = { ...(m != null ? { maxPerPayment: `${m} ${t}` } : {}), ...(d != null ? { dailyBudget: `${d} ${t}`, leftToday: fmt(maxZero(parseAmount(String(d), t) - spent - held), t) } : {}) };
       }
-      return { name: p.name, address: p.address, tokens, note: p.note || null, ...(p.category ? { category: p.category } : {}), ...(p.expiresAt ? { expiresAt: p.expiresAt } : {}), ...(Object.keys(lim).length ? { limits: lim } : {}) };
+      return { name: p.name, address: p.address, tokens, note: p.note || null, ...(p.proof ? { provedAt: p.proof.at } : {}), ...(p.category ? { category: p.category } : {}), ...(p.expiresAt ? { expiresAt: p.expiresAt } : {}), ...(Object.keys(lim).length ? { limits: lim } : {}) };
     }),
     note: "Only the owner can change rules or payees, and only in their own terminal. Payments that need approval wait for `reinpay approve`.",
   };

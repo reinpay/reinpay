@@ -172,6 +172,9 @@ export function decide({ rules, receipts, request, now = Date.now(), excludeId =
   if (rules.hours && !insideHours(rules.hours, now)) {
     return { status: "needs_approval", rule: "quiet hours", reason: `Outside your payment hours (${rules.hours.from}:00 to ${rules.hours.to}:00 local${rules.hours.weekdays ? ", weekdays" : ""}). Waiting for you.` };
   }
+  if (rules.requireProven && !payee.proof && payee.isContract !== true) {
+    return { status: "needs_approval", rule: "unproven payee", reason: `${payee.name} has not proved it controls ${payee.address}. You asked to approve payments to unproven payees yourself (reinpay payee challenge "${payee.name}").` };
+  }
   const line = limit(rules, "approveAbove", symbol);
   if (line !== null && amountRaw > line) return { status: "needs_approval", rule: "approval line", reason: `${fmt(amountRaw, symbol)} is above your approval line of ${fmt(line, symbol)}.` };
   return { status: "allowed", rule: "within rules", reason: "Inside every rule." };
