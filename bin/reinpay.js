@@ -26,6 +26,9 @@ const HELP = `reinpay ${pkg.version} - a wallet for AI agents that only spends i
   reinpay rule repeat-guard <minutes>      Hold repeats of the same payment for that long (0 turns it off)
   reinpay rule breaker <count> <minutes> | off   Freeze when the agent is blocked that often (default 5 in 10 minutes)
   reinpay rule first-payment <ask|off>     Make the first payment to every payee wait for you
+  reinpay grant <token> <amount> --for=2h [--note=...]   Extra budget for a while, on top of the daily budget
+  reinpay grant list | clear               Show or remove grants
+  reinpay check <payee> <amount> [token]   Dry run: what would happen to this payment now (nothing recorded or signed)
   reinpay freeze [reason]                  Stop every payment now (requests, autosend, approvals)
   reinpay unfreeze                         Start again after checking reinpay receipts. Terminal only.
   reinpay autosend <on|off>                Send payments that are inside every rule without asking (needs unlock)
@@ -41,6 +44,8 @@ const HELP = `reinpay ${pkg.version} - a wallet for AI agents that only spends i
   reinpay statement [--days=30] [--out=file.json]   A spending statement signed with your wallet key
   reinpay statement check <file.json>      Check anyone's statement: the signature, then every payment on the chain
   reinpay digest [--days=1] [--dry]        Send a short spending summary to your Telegram or webhook (for a daily schedule)
+  reinpay backup [--out=file.json]         Everything needed to move this wallet: key (still encrypted), rules, payees, receipts
+  reinpay restore <file.json>              Restore a backup into an empty wallet or profile. Terminal only.
   reinpay doctor [--json]                  Check this computer's setup: Node, RPC, chain, wallet, seal, unlock, gas money, payees, budgets
   reinpay token add <0xaddress> | list | remove <SYMBOL>
                                            Spend another ERC-20 (checked on-chain and on Sourcify first)
@@ -280,6 +285,47 @@ async function main() {
     if (res.some((v) => v.checks && !v.ok)) process.exitCode = 1;
     return;
   }
+  if (cmd === "grant") {
+    const [sub] = pos;
+    const cfg = C.loadConfig();
+    const now = Date.now();
+    if (sub === "list" || !sub) return console.log(JSON.stringify((cfg.rules.grants || []).map((g) => ({ ...g, active: Date.parse(g.until) > now })), null, 2));
+    requireTTY("grant");
+    if (sub === "clear") { delete cfg.rules.grants; C.saveConfig(cfg); return console.log("All grants removed."); }
+    const tok = String(sub).toUpperCase(), amount = pos[1];
+    const { syncTokens } = await import("../src/chain.js");
+    if (!Object.keys(syncTokens(cfg)).includes(tok) || !/^\d+(\.\d+)?$/.test(String(amount || ""))) throw new Error("Usage: reinpay grant <token> <amount> --for=2h [--note=...]");
+    const ms = (await import("../src/rules.js")).parseDuration(opt("for") || "");
+    if (!ms || ms > 30 * 86_400_000) throw new Error("--for is required, up to 30d (e.g. --for=2h).");
+    const g = { token: tok, amount: String(amount), until: new Date(now + ms).toISOString(), ...(opt("note") ? { note: opt("note").slice(0, 100) } : {}) };
+    cfg.rules.grants = [...(cfg.rules.grants || []).filter((x) => Date.parse(x.until) > now), g];
+    C.saveConfig(cfg);
+    return console.log(`Granted ${g.amount} ${tok} on top of the daily budget until ${g.until}.`);
+  }
+  if (cmd === "check") {
+    const [payee, amount, token] = pos;
+    if (!payee || !amount) throw new Error("Usage: reinpay check <payee> <amount> [token]");
+    const v = await P.previewPayment({ payee, amount, token: token || "USDG" });
+    return console.log(flags.has("--json") ? JSON.stringify(v, null, 2) : `Dry run: ${v.amount} ${v.token} to ${v.payee} would be ${v.wouldBe.toUpperCase()} (${v.rule}). ${v.reason}${v.simulation ? `\nSimulated on mainnet at block ${v.simulation.block}${v.simulation.estimatedFeeEth ? `, fee about ${v.simulation.estimatedFeeEth} ETH` : ""}.` : ""}\nNothing was recorded or signed.`);
+  }
+  if (cmd === "backup") {
+    const { makeBackup } = await import("../src/backup.js");
+    const { writeFileSync: wf, existsSync: ex } = await import("node:fs");
+    const b = makeBackup();
+    const out = opt("out") || `reinpay-backup-${b.address.slice(2, 8).toLowerCase()}-${b.createdAt.slice(0, 10)}.json`;
+    if (ex(out) && !flags.has("--force")) throw new Error(`${out} already exists. Use --out=<file> or --force.`);
+    wf(out, JSON.stringify(b, null, 1) + "\n", { mode: 0o600 });
+    return console.log(`Wrote ${out} for ${b.address}. The key inside is still encrypted with your passphrase; keep the file somewhere safe anyway, and do not share it.`);
+  }
+  if (cmd === "restore") {
+    requireTTY("restore");
+    const { restoreBackup } = await import("../src/backup.js");
+    const { readFileSync: rf } = await import("node:fs");
+    if (!pos[0]) throw new Error("Usage: reinpay restore <file.json>");
+    let b; try { b = JSON.parse(rf(pos[0], "utf8")); } catch { throw new Error(`${pos[0]} is not a readable JSON file.`); }
+    const r = await restoreBackup(b);
+    return console.log(`Restored ${r.address} with ${r.receipts} receipts${r.frozen ? " (still frozen)" : ""}. Config seal: ${r.seal.ok ? "ok" : r.seal.reason}.\nYour passphrase is the same as before. Run reinpay doctor to check the setup.`);
+  }
   if (cmd === "statement") {
     const S = await import("../src/statement.js");
     const { readFileSync: rf, writeFileSync: wf, existsSync: ex } = await import("node:fs");
@@ -336,7 +382,7 @@ async function main() {
 }
 
 // Commands that change rules, payees, tokens or notifications seal the config with the wallet key afterwards.
-const MUTATING = ["rule", "autosend"].includes(cmd) || (cmd === "notify" && pos[0] !== "test") || (cmd === "payee" && ["add", "remove", "off", "on", "limit", "until"].includes(pos[0])) || (cmd === "token" && ["add", "remove"].includes(pos[0]));
+const MUTATING = ["rule", "autosend"].includes(cmd) || (cmd === "grant" && pos[0] && pos[0] !== "list") || (cmd === "notify" && pos[0] !== "test") || (cmd === "payee" && ["add", "remove", "off", "on", "limit", "until"].includes(pos[0])) || (cmd === "token" && ["add", "remove"].includes(pos[0]));
 async function reseal(passphrase) {
   const K = await import("../src/keystore.js"), C = await import("../src/config.js"), { sealConfig } = await import("../src/seal.js");
   const pass = passphrase ?? (K.isUnlocked() ? undefined : await ask("Passphrase to seal your rules (hidden): ", { hidden: true }));

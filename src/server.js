@@ -4,7 +4,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { readFileSync } from "node:fs";
-import { walletStatus, rulesView, requestPayment, listReceipts } from "./pay.js";
+import { walletStatus, rulesView, requestPayment, listReceipts, previewPayment } from "./pay.js";
 import { getReceipt, view } from "./receipts.js";
 import { verifyReceipt } from "./verify.js";
 import { freeze, frozen } from "./freeze.js";
@@ -26,6 +26,8 @@ export const TOOLS = [
     { payee: z.string().describe("Payee name exactly as get_rules lists it"), amount: z.string().describe("Amount as decimal text, e.g. \"12.5\""),
       token: z.string().max(11).optional().describe("A token symbol that get_rules lists (USDG, ETH, or one the owner added). Default USDG"), memo: z.string().max(200).describe("What the payment is for") },
     { readOnlyHint: false, destructiveHint: false, openWorldHint: true }, (a) => requestPayment(a, { by: "agent" })],
+  ["check_payment", "Check a payment first", "Dry run: what would happen if you asked for this payment now (blocked, needs the owner, ready or sent), with the rule and reason, simulated on mainnet when the rules would let it through. Nothing is recorded, nothing counts against the budget, nothing is signed. Use it to plan, then call request_payment once.",
+    { payee: z.string().describe("Payee name exactly as get_rules lists it"), amount: z.string().describe("Amount as decimal text"), token: z.string().max(11).optional().describe("Token symbol, default USDG") }, READ, (a) => previewPayment(a)],
   ["get_receipt", "Receipt", "One receipt by id (RP-00001): status, the rule that decided, the simulation, and the transaction once sent.", { id: z.string() }, READ,
     (a) => { const r = getReceipt(a.id); if (!r) throw new Error(`No receipt ${a.id}.`); return view(r); }],
   ["verify_receipt", "Verify a receipt on-chain", "Read a sent payment back from Robinhood Chain mainnet and check it against its receipt: confirmed and succeeded, sent from this wallet, to the payee, the exact amount and token. Use it before telling the user a payment arrived.", { id: z.string() }, READ,

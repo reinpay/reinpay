@@ -80,7 +80,20 @@ reinpay rule first-payment ask    # the first payment to every payee waits for y
 reinpay statement --days=30       # a spending statement signed with your wallet key
 reinpay statement check file.json # check anyone's statement against the chain
 reinpay digest                    # a short summary to your Telegram or webhook (put it on a daily schedule)
+reinpay check "Weather API" 3     # dry run: what would happen now (nothing recorded or signed)
+reinpay grant USDG 20 --for=2h    # extra budget for one task, gone when the time is up
+reinpay backup                    # move this wallet: key (still encrypted), rules, payees, receipts
 ```
+
+### Dry runs and grants
+
+`reinpay check <payee> <amount> [token]`, and the `check_payment` tool for the agent, say what would happen to a payment right now: blocked (and by which rule), waiting for you, ready, or sent. If the rules would let it through, it is simulated on mainnet too. Nothing is recorded, nothing counts against a budget, and the circuit breaker does not see it, so an agent can plan without getting blocked.
+
+`reinpay grant <token> <amount> --for=2h [--note=...]` adds to today's budget until the time is up (at most 30 days). `reinpay grant list` shows them, `reinpay grant clear` removes them. Grants are part of the sealed rules.
+
+### Moving to another computer
+
+`reinpay backup [--out=file.json]` writes the keystore exactly as it is (still encrypted with your passphrase), the config, the receipts and a freeze if there is one. It never includes the passphrase file. On the new computer, install Reinpay and run `reinpay restore file.json` (terminal only). It refuses to overwrite a wallet, refuses a file that was changed, and checks the config seal. Use `--profile=<name>` to restore next to an existing wallet. Treat the backup like the key itself: anyone with the file and your passphrase has the wallet.
 
 ### Statements
 
@@ -112,6 +125,7 @@ Address poisoning scams send you dust from an address that starts and ends like 
 | `get_receipt` | One receipt by id |
 | `list_receipts` | Recent receipts, optionally by status |
 | `verify_receipt` | Read a sent payment back from the chain and check it against its receipt |
+| `check_payment` | Dry run: what would happen to a payment now, without recording anything |
 | `freeze_wallet` | Stop every payment until the owner unfreezes it (the agent can freeze, never unfreeze) |
 
 ## One wallet per agent
@@ -205,7 +219,7 @@ The repeat guard is 10 minutes, and `autosend` is off. A token with no daily bud
 npm test
 ```
 
-`test/rules.test.mjs` checks every rule offline, `test/lock.test.mjs` the spend lock (including two processes), `test/report.test.mjs` the spending report, `test/notify.test.mjs` the owner notifications, `test/csv.test.mjs` the CSV export and `test/profile.test.mjs` the profiles, `test/seal.test.mjs` the config seal and unlock, `test/guard.test.mjs` the lookalike guard, `test/verify.test.mjs` the on-chain receipt check and `test/doctor.test.mjs` the checkup and `test/freeze.test.mjs` the freeze, the circuit breaker and expiring payees, and `test/paper.test.mjs` statements, the first-payment rule and the digest. `test/live.mjs` runs on mainnet:
+`test/rules.test.mjs` checks every rule offline, `test/lock.test.mjs` the spend lock (including two processes), `test/report.test.mjs` the spending report, `test/notify.test.mjs` the owner notifications, `test/csv.test.mjs` the CSV export and `test/profile.test.mjs` the profiles, `test/seal.test.mjs` the config seal and unlock, `test/guard.test.mjs` the lookalike guard, `test/verify.test.mjs` the on-chain receipt check and `test/doctor.test.mjs` the checkup and `test/freeze.test.mjs` the freeze, the circuit breaker and expiring payees, `test/paper.test.mjs` statements, the first-payment rule and the digest, and `test/plan.test.mjs` grants, dry runs and backup/restore. `test/live.mjs` runs on mainnet:
 
 - USDG transfer simulations from a public holder, and tampered ones that must be refused;
 - the full flow with a throwaway wallet that has a pretend ETH balance only inside the simulation;
@@ -216,7 +230,8 @@ npm test
 - `verify` against a real public token transfer and a real ETH payment from the last few hundred blocks, and altered copies that must not match;
 - `doctor` against the real RPC, and the lookalike guard;
 - the agent freezing the wallet over MCP, and its next request blocked;
-- statements built from a real public payment: one with the wrong signer and one claiming someone else's payment, both refused.
+- statements built from a real public payment: one with the wrong signer and one claiming someone else's payment, both refused;
+- a dry run simulated on mainnet that records nothing, and `check_payment` over MCP.
 
 No transaction is signed or sent.
 

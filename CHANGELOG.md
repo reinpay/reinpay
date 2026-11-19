@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.9.0 (unreleased): plan and move
+
+- Dry run: `reinpay check <payee> <amount> [token]` and the new MCP tool `check_payment` say what would happen to a payment right now (blocked with the rule, waiting for you, ready or sent), simulated on mainnet when the rules would let it through. No receipt, nothing counted against a budget, nothing signed, and the circuit breaker does not count it.
+- Budget grants: `reinpay grant <token> <amount> --for=2h [--note=...]` adds to today's budget until the time is up (up to 30 days); `grant list` and `grant clear`. Grants live in the sealed rules; `get_rules` shows them inside today's budget.
+- `reinpay backup [--out=file.json]` and `reinpay restore <file>`: move a wallet to another computer. The keystore stays encrypted, the passphrase file is never included, files are written readable by the owner only. Restore refuses to overwrite a wallet, refuses a backup whose hash does not match, and reports the config seal.
+- Tests: 24 grant, dry-run and backup checks offline, plus 2 new live mainnet checks. All passing. No transaction is signed or sent.
+
 ## 0.8.0 (unreleased): proof and paperwork
 
 - `reinpay statement [--days=30] [--out=file.json]`: every sent payment in the period, with totals per token, signed with the wallet's own key. `reinpay statement check <file>` needs no wallet: it checks that the wallet named in the file signed it, that it was not changed after signing, and reads every payment back from Robinhood Chain. A statement signed by someone else, or listing a payment the wallet did not make, is refused.

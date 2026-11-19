@@ -58,6 +58,9 @@ const rq = (payee, amount, token = "ETH", memo = "live test") => P.requestPaymen
 
 const r1 = await rq("Test payee", "0.0005");
 check("0.0005 ETH inside the rules: simulated on mainnet, then waits because autosend is off", r1.status === "ready" && r1.simulation?.ok && /autoSend is off/.test(r1.reason), r1.simulation && `block ${r1.simulation.block}, fee ~${r1.simulation.estimatedFeeEth} ETH`);
+const nBefore = (await import("../src/receipts.js")).allReceipts().length;
+const pv = await P.previewPayment({ payee: "Test payee", amount: "0.0004", token: "ETH" });
+check("dry run: simulated on mainnet, would wait for the owner, and nothing was recorded", pv.dryRun && pv.wouldBe === "ready" && pv.simulation?.ok && (await import("../src/receipts.js")).allReceipts().length === nBefore, pv.simulation && `block ${pv.simulation.block}`);
 check("the receipt the agent sees has no transaction data", r1.tx === undefined);
 const r2 = await rq("Test payee", "0.0005");
 check("the same payment again is held by the repeat guard", r2.status === "needs_approval" && r2.rule === "repeat guard");
@@ -194,7 +197,7 @@ const { StdioClientTransport } = await import("@modelcontextprotocol/sdk/client/
 const mcp = new Client({ name: "reinpay-live-test", version: "0.0.0" });
 await mcp.connect(new StdioClientTransport({ command: process.execPath, args: [fileURLToPath(new URL("../bin/reinpay.js", import.meta.url)), "mcp"], env: { ...process.env, REINPAY_HOME: home } }));
 const names = (await mcp.listTools()).tools.map((t) => t.name).sort();
-check(`the agent gets 7 tools (${names.join(", ")})`, names.join() === "freeze_wallet,get_receipt,get_rules,list_receipts,request_payment,verify_receipt,wallet_status");
+check(`the agent gets 8 tools (${names.join(", ")})`, names.join() === "check_payment,freeze_wallet,get_receipt,get_rules,list_receipts,request_payment,verify_receipt,wallet_status");
 check("no tool can approve, reject or change rules or payees", !names.some((n) => /approve|reject|rule_set|payee|unlock|autosend/.test(n)));
 const call = async (name, args = {}) => { const r = await mcp.callTool({ name, arguments: args }); return { err: !!r.isError, text: r.content.map((x) => x.text).join("") }; };
 const rules = JSON.parse((await call("get_rules")).text);
@@ -213,6 +216,8 @@ const one2 = JSON.parse((await call("get_receipt", { id: r1.id })).text);
 check("get_receipt shows the history of an approval that was refused", one2.history.some((h) => /Approval refused/.test(h.note)));
 const mv = JSON.parse((await call("verify_receipt", { id: r1.id })).text);
 check("verify_receipt over MCP: a receipt that was never sent has nothing to check", mv.ok === false && /nothing was sent/.test(mv.reason));
+const cp = JSON.parse((await call("check_payment", { payee: "Test payee", amount: "0.0001", token: "ETH" })).text);
+check("check_payment over MCP: with the real (empty) balance it says the payment would be blocked in simulation", cp.dryRun && cp.wouldBe === "blocked" && cp.rule === "simulation");
 const fzr = JSON.parse((await call("freeze_wallet", { reason: "live test: the agent pulls the brake" })).text);
 check("freeze_wallet over MCP: the agent can pull the brake", fzr.frozen?.by === "agent");
 const afterFz = JSON.parse((await call("request_payment", { payee: "Test payee", amount: "0.0001", token: "ETH", memo: "after freeze" })).text);

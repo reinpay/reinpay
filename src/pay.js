@@ -3,7 +3,7 @@
 import { encodeFunctionData, erc20Abi, getAddress, isAddress, formatEther, createWalletClient } from "viem";
 import { publicClient, robinhoodChain, transport, token as tokenOf, TOKENS, BUILTIN, syncTokens, txLink, addrLink, CHAIN_ID } from "./chain.js";
 import { loadConfig, saveConfig } from "./config.js";
-import { decide, findPayee, parseAmount, totals, limit, fmt } from "./rules.js";
+import { decide, findPayee, parseAmount, totals, limit, fmt, dailyLimit, activeGrants } from "./rules.js";
 
 const maxZero = (v) => (v > 0n ? v : 0n);
 import { allReceipts, addReceipt, updateReceipt, getReceipt, view } from "./receipts.js";
@@ -146,6 +146,30 @@ export async function requestPayment({ payee, amount, token = "USDG", memo = "" 
   return view(r);
 }
 
+/**
+ * Dry run, for the agent and the owner: what would happen to this payment right now? The rules are checked and, if they
+ * would let it through or ask the owner, the payment is simulated on mainnet. No receipt is written, nothing counts
+ * against any budget, nothing is signed, and the circuit breaker does not see it.
+ */
+export async function previewPayment({ payee, amount, token = "USDG" }) {
+  const from = requireWallet();
+  const cfg = loadConfig();
+  syncTokens(cfg);
+  const symbol = tokenOf(token).symbol;
+  const amountRaw = parseAmount(amount, symbol);
+  const p = findPayee(cfg.payees, payee);
+  const out = (wouldBe, rule, reason, extra = {}) => ({ dryRun: true, payee: p ? p.name : String(payee ?? ""), token: symbol, amount: fmt(amountRaw, symbol).split(" ")[0], wouldBe, rule, reason, ...extra, note: "Nothing was recorded or signed. Call request_payment to actually ask." });
+  const fz = frozen();
+  if (fz) return out("blocked", "frozen", `Reinpay is frozen (${fz.reason}).`);
+  if (p && p.isContract !== false) { const tok = await tokenAt(p.address); if (tok) return out("blocked", "token contract", `${p.name} is the contract of ${tok}.`); }
+  const d = decide({ rules: cfg.rules, receipts: allReceipts(), request: { payee: p, token: symbol, amountRaw } });
+  if (d.status === "blocked") return out("blocked", d.rule, d.reason);
+  const ch = await check(from, symbol, p.address, amountRaw);
+  if (ch.problem) return out("blocked", "simulation", `Simulated on mainnet: ${ch.problem}.`, { simulation: simView(ch.sim) });
+  const wouldBe = d.status === "needs_approval" ? "needs_approval" : cfg.rules.autoSend && isUnlocked() ? "sent" : "ready";
+  return out(wouldBe, d.rule, wouldBe === "ready" ? `${d.reason} It would wait for the owner because autoSend is ${cfg.rules.autoSend ? "on but the wallet is locked" : "off"}.` : d.reason, { simulation: simView(ch.sim, ch.feeWei) });
+}
+
 /** Owner only (terminal): approve a waiting payment. Rules and the simulation are checked again first. */
 export async function approve(id, { passphrase } = {}) {
   const pre = getReceipt(id);
@@ -193,10 +217,11 @@ export function rulesView(now = Date.now()) {
   syncTokens(cfg);
   const per = {};
   for (const s of Object.keys(TOKENS)) {
-    const daily = limit(cfg.rules, "daily", s);
+    const daily = dailyLimit(cfg.rules, s, now);
+    const grants = activeGrants(cfg.rules, s, now);
     const { spent, held } = totals(allReceipts(), s, now);
     per[s] = {
-      dailyBudget: daily === null ? null : fmt(daily, s), sentToday: fmt(spent, s), waitingToday: fmt(held, s),
+      dailyBudget: daily === null ? null : fmt(daily, s), ...(grants.length ? { includesGrants: grants.map((g) => ({ amount: fmt(g.amountRaw, s), until: g.until, note: g.note })) } : {}), sentToday: fmt(spent, s), waitingToday: fmt(held, s),
       leftToday: daily === null ? null : fmt(daily > spent + held ? daily - spent - held : 0n, s),
       maxPerPayment: cfg.rules.maxPerPayment?.[s] != null ? fmt(limit(cfg.rules, "maxPerPayment", s), s) : null,
       ...Object.fromEntries([["weekly", "week"], ["monthly", "month"]].flatMap(([k, period]) => {

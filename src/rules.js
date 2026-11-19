@@ -20,6 +20,20 @@ export function limit(rules, key, symbol) {
   return parseUnits(s, TOKENS[symbol].decimals);
 }
 
+/** Active budget grants for a token: [{ amountRaw, until, note }]. A grant adds to the daily budget until it expires. */
+export function activeGrants(rules, symbol, now = Date.now()) {
+  return (rules?.grants || []).filter((g) => g && g.token === symbol && Date.parse(g.until) > now && /^\d+(\.\d+)?$/.test(String(g.amount)))
+    .map((g) => ({ amountRaw: parseUnits(String(g.amount), TOKENS[symbol].decimals), until: g.until, note: g.note || null }));
+}
+
+/** Today's budget for a token: the daily rule plus active grants. null when neither is set. */
+export function dailyLimit(rules, symbol, now = Date.now()) {
+  const base = limit(rules, "daily", symbol);
+  const extra = activeGrants(rules, symbol, now).reduce((a, g) => a + g.amountRaw, 0n);
+  if (base === null && extra === 0n) return null;
+  return (base || 0n) + extra;
+}
+
 export const fmt = (raw, symbol) => `${formatUnits(BigInt(raw), TOKENS[symbol].decimals)} ${symbol}`;
 
 /** Parse a user or agent amount ("12.5") into base units; throws with a plain reason. */
@@ -79,7 +93,7 @@ export function decide({ rules, receipts, request, now = Date.now(), excludeId =
   if (payee.tokens && !payee.tokens.includes(symbol)) return { status: "blocked", rule: "payee tokens", reason: `${payee.name} may only be paid in ${payee.tokens.join(" or ")}.` };
   if (!(amountRaw > 0n)) return { status: "blocked", rule: "amount", reason: "The amount must be above zero." };
 
-  const daily = limit(rules, "daily", symbol);
+  const daily = dailyLimit(rules, symbol, now);
   if (daily === null || daily === 0n) return { status: "blocked", rule: "daily budget", reason: `There is no daily budget for ${symbol}, so the agent may not spend it.` };
   const cap = limit(rules, "maxPerPayment", symbol);
   if (cap !== null && amountRaw > cap) return { status: "blocked", rule: "max per payment", reason: `${fmt(amountRaw, symbol)} is above the max of ${fmt(cap, symbol)} per payment.` };
