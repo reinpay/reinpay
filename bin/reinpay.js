@@ -47,6 +47,7 @@ const HELP = `reinpay ${pkg.version} - a wallet for AI agents that only spends i
   reinpay grant <token> <amount> --for=2h [--note=...]   Extra budget for a while, on top of the daily budget
   reinpay grant list | clear               Show or remove grants
   reinpay check <payee> <amount> [token]   Dry run: what would happen to this payment now (nothing recorded or signed)
+  reinpay check <payee> <amount> [token] --explain   The same, with every rule in order and the one that decided
   reinpay freeze [reason] [--all]          Stop every payment now (requests, autosend, approvals); --all: every profile
   reinpay unfreeze [--all]                 Start again after checking reinpay receipts. Terminal only.
   reinpay autosend <on|off>                Send payments that are inside every rule without asking (needs unlock)
@@ -518,8 +519,9 @@ async function main() {
   }
   if (cmd === "check") {
     const [payee, amount, token] = pos;
-    if (!payee || !amount) throw new Error("Usage: reinpay check <payee> <amount> [token]");
-    const v = await P.previewPayment({ payee, amount, token: token || "USDG" });
+    if (!payee || !amount) throw new Error("Usage: reinpay check <payee> <amount> [token] [--explain]");
+    const v = await P.previewPayment({ payee, amount, token: token || "USDG", explain: flags.has("--explain") });
+    if (v.steps && !flags.has("--json")) { const { explainLines } = await import("../src/explain.js"); console.log(`Every rule, in order, for ${v.amount} ${v.token} to ${v.payee}:`); for (const l of explainLines(v.steps)) console.log(l); console.log(""); }
     return console.log(flags.has("--json") ? JSON.stringify(v, null, 2) : `Dry run: ${v.amount} ${v.token} to ${v.payee} would be ${v.wouldBe.toUpperCase()} (${v.rule}). ${v.reason}${v.simulation ? `\nSimulated on mainnet at block ${v.simulation.block}${v.simulation.estimatedFeeEth ? `, fee about ${v.simulation.estimatedFeeEth} ETH` : ""}.` : ""}\nNothing was recorded or signed.`);
   }
   if (cmd === "backup") {

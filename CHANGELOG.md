@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.31.0 (unreleased): why, rule by rule
+
+- `reinpay check <payee> <amount> [token] --explain`: every rule in order with what it found (✓ ✗ ⏸ ·), the one that decided marked, the rest after a block or hold shown as not reached, and the mainnet simulation as the last line.
+- `check_payment` takes `explain: true` and returns the same steps.
+- Tests: 18 checks offline, including 400 random requests where the explanation must name the same rule as the decision.
+
 ## 0.30.0 (unreleased): stay up to date
 
 - `reinpay --version --check`: compares the installed version with the public `package.json` on GitHub and prints the update command when a newer one is out. Never installs anything by itself.

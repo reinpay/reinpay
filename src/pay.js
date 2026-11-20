@@ -200,21 +200,28 @@ export async function budgetAlert(cfg, symbol, { now = Date.now(), fetch: f } = 
  * would let it through or ask the owner, the payment is simulated on mainnet. No receipt is written, nothing counts
  * against any budget, nothing is signed, and the circuit breaker does not see it.
  */
-export async function previewPayment({ payee, amount, token = "USDG", memo }) {
+export async function previewPayment({ payee, amount, token = "USDG", memo, explain: wantSteps = false }) {
   const from = requireWallet();
   const cfg = loadConfig();
   syncTokens(cfg);
   const symbol = tokenOf(token).symbol;
   const amountRaw = parseAmount(amount, symbol);
   const p = findPayee(cfg.payees, payee);
-  const out = (wouldBe, rule, reason, extra = {}) => ({ dryRun: true, payee: p ? p.name : String(payee ?? ""), token: symbol, amount: fmt(amountRaw, symbol).split(" ")[0], wouldBe, rule, reason, ...extra, note: "Nothing was recorded or signed. Call request_payment to actually ask." });
+  let steps = null; // filled when the caller asked for the explanation (reinpay check --explain)
+  const out = (wouldBe, rule, reason, extra = {}) => ({ dryRun: true, payee: p ? p.name : String(payee ?? ""), token: symbol, amount: fmt(amountRaw, symbol).split(" ")[0], wouldBe, rule, reason, ...extra, ...(wantSteps ? { steps: steps || [{ rule, state: "block", detail: reason, decided: true, reached: true }] } : {}), note: "Nothing was recorded or signed. Call request_payment to actually ask." });
   const fz = frozen();
   if (fz) return out("blocked", "frozen", `Reinpay is frozen (${fz.reason}).`);
   if (p && p.isContract !== false) { const tok = await tokenAt(p.address); if (tok) return out("blocked", "token contract", `${p.name} is the contract of ${tok}.`); }
   const usd = await usdFor(cfg, symbol, amountRaw);
-  const d = decide({ rules: memo === undefined ? { ...cfg.rules, memoMin: 0 } : cfg.rules, receipts: allReceipts(), request: { payee: p, token: symbol, amountRaw, memo, usdRaw: usd.usdRaw, usdReason: usd.usdReason } });
+  const dArgs = { rules: memo === undefined ? { ...cfg.rules, memoMin: 0 } : cfg.rules, receipts: allReceipts(), request: { payee: p, token: symbol, amountRaw, memo, usdRaw: usd.usdRaw, usdReason: usd.usdReason } };
+  const d = decide(dArgs);
+  if (wantSteps) steps = (await import("./explain.js")).explain(dArgs).steps;
   if (d.status === "blocked") return out("blocked", d.rule, d.reason);
   const ch = await check(from, symbol, p.address, amountRaw, cfg.rules);
+  if (steps) { // the mainnet simulation runs after the rules; it only counts when the rules let the payment through
+    const blk = ch.problem ? { rule: ch.rule || "simulation", state: "block", detail: ch.problem } : { rule: "simulation", state: "pass", detail: `one transfer out, at block ${ch.sim.block}${ch.feeWei != null ? `, fee about ${formatEther(ch.feeWei)} ETH` : ""}` };
+    steps = [...steps.map((x) => (ch.problem ? { ...x, decided: false } : x)), { ...blk, decided: !!ch.problem, reached: true }];
+  }
   if (ch.problem) return out("blocked", ch.rule || "simulation", `Simulated on mainnet: ${ch.problem}.`, { simulation: simView(ch.sim) });
   const wouldBe = d.status === "needs_approval" ? "needs_approval" : cfg.rules.autoSend && isUnlocked() ? "sent" : "ready";
   return out(wouldBe, d.rule, wouldBe === "ready" ? `${d.reason} It would wait for the owner because autoSend is ${cfg.rules.autoSend ? "on but the wallet is locked" : "off"}.` : d.reason, { simulation: simView(ch.sim, ch.feeWei) });
