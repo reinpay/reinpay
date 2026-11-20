@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.51.1 (unreleased): check your rules
+
+- `src/labcore.js`: the pure part of Reinpay Lab, plus `checkOffline` to run the scams against any rules with the rules engine alone; reinpay.app/lab uses it in the browser for "Check your rules".
+- Tests: 9 checks offline, including agreement with a real mainnet run for every rule set.
+
 ## 0.51.0 (unreleased): Reinpay Lab
 
 - `reinpay lab run [--out=] [--json]`: seven scams against five rule sets on throwaway wallets, real rules and real mainnet simulations, nothing signed; wording drawn from a block hash; each cell paid, held or blocked with the deciding rule.
