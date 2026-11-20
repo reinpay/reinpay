@@ -23,6 +23,7 @@ const HELP = `reinpay ${pkg.version} - a wallet for AI agents that only spends i
   reinpay address                          Print the wallet address
   reinpay status                           Balances, budgets left today and the rules
   reinpay today [--json]                   One screen: budget bars per token, what waits for you, blocks, next bills, brakes
+  reinpay headroom [--json]                What the agent could still pay each payee now: without you, with your yes, and what stops it
   reinpay unlock [--for=12h] | lock        Store (for a while) or remove the passphrase file the server signs with
   reinpay seal                             Check your rules, then seal them with your wallet key
   reinpay rules                            Show the rules
@@ -256,6 +257,7 @@ async function main() {
     return console.log(v.ok ? `\nEvery entry is signed by this wallet and follows the one before it. The rules sealed now are the last entry.` : `\nProblems:\n${v.problems.map((p) => "  " + p).join("\n")}`);
   }
   if (cmd === "rules") return console.log(JSON.stringify(P.rulesView(), null, 2));
+  if (cmd === "headroom") { const h = await P.headroomView(); if (flags.has("--json")) return console.log(JSON.stringify(h.rows, null, 2)); console.log("What the agent could ask for right now, per payee:"); for (const l of h.lines) console.log(l); return console.log("\nWorked out by the same rules that decide every payment. The repeat guard is left out: it is about one exact amount."); }
   if (cmd === "today") { const t = await P.todayView(); return console.log(flags.has("--json") ? JSON.stringify(t.data, null, 2) : t.lines.join("\n")); }
 
   if (cmd === "rule") {

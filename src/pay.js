@@ -420,6 +420,19 @@ export async function walletStatus() {
   return { address: a, chainId: CHAIN_ID, explorer: addrLink(a), balances: Object.fromEntries(Object.entries(b).map(([s, v]) => [s, fmt(v, s).split(" ")[0]])), ...rulesView() };
 }
 
+/** reinpay headroom: what the agent could still pay each payee right now, without you and with your yes. Local only. */
+export async function headroomView(now = Date.now()) {
+  const cfg = loadConfig();
+  syncTokens(cfg);
+  expireStale(cfg.rules, now);
+  const { headroom, headroomLines } = await import("./headroom.js");
+  let price = null; // USD rules need one ETH price for the whole search; read it once
+  if (usdRules(cfg.rules)) { try { price = (await usdValue("ETH", 10n ** 18n)).value; } catch { price = null; } }
+  const usdFor = usdRules(cfg.rules) ? (t, a) => (t === "USDG" ? { usdRaw: a.toString() } : price != null ? { usdRaw: ((a * BigInt(price)) / 10n ** 18n).toString() } : { usdReason: "no ETH price" }) : null;
+  const rows = headroom({ rules: cfg.rules, receipts: allReceipts(), payees: cfg.payees, now, usdFor });
+  return { rows: rows.map((r) => ({ ...r, free: fmt(r.free, r.token), withYou: fmt(r.withYou, r.token) })), lines: headroomLines(rows) };
+}
+
 /** reinpay today: the owner's one-screen summary. The balances are read from the chain; if that fails, the rest still shows. */
 export async function todayView(now = Date.now()) {
   const a = requireWallet();

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.38.0 (unreleased): headroom
+
+- `reinpay headroom [--json]`: per payee and token, the largest amount that would go through without you, the largest that would wait for you, and the rule that stops it above that. Found by asking the rules engine itself.
+- Tests: 9 checks offline, including that every number agrees with the decision at it and one unit above it.
+
 ## 0.37.0 (unreleased): approve, dry
 
 - `reinpay approve <RP-id> ... | --all --dry [--json]`: every check approve makes, fresh now, including a new mainnet simulation, then it stops before signing. Nothing recorded or changed, no passphrase.
