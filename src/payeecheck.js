@@ -29,3 +29,14 @@ export function payeeVerdict(f) {
   if (next) L.push(`To add it: ${next}`);
   return { verdict, kind, lines: L, next };
 }
+
+/**
+ * What reinpay payee add does after the check: "go" adds it, "ask" wants the owner to type yes (or --yes),
+ * "stop" refuses, "lookalike" leaves it to the lookalike guard, which asks for the address in full.
+ */
+export function addStep(v, { yes = false } = {}) {
+  if (v.lookalike && !v.own && !v.token) return "lookalike";
+  if (v.verdict === "stop") return "stop";
+  if (v.verdict === "careful") return yes ? "go" : "ask";
+  return "go";
+}

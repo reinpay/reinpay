@@ -152,6 +152,14 @@ All three are off until you set them.
 
 `reinpay payee check <0xaddress>` reads an address from Robinhood Chain before you add it: a wallet, a contract or a token contract; how many transactions it has sent; its ETH and USDG balance; whether a contract is verified on Sourcify; whether it is already on your list; and whether it starts and ends like one of your payees or your own wallet. Then one verdict: looks fine, be careful, or do not add, with the reason and the `payee add` command when it makes sense. Nothing is added or changed. `--json` gives the same as data.
 
+### Payee add checks first
+
+`reinpay payee add` now runs `payee check` before it adds anything and shows what it found. A wallet with a history is added. A fresh address with no history, or a contract, waits until you type `yes` (or pass `--yes`). A token contract or your own wallet is refused, `--yes` or not, and a lookalike still goes to the lookalike guard, which wants the full address typed again. If the chain cannot be read, it says so and asks before adding without the check. `--no-check` skips it.
+
+### Rules history
+
+Every time your rules or payees are sealed, Reinpay adds one entry to `rules-history.json`: what changed (before → after), when, a snapshot, a link to the entry before it, and a signature from your wallet key. `reinpay rules history [--last=10] [--json]` lists the changes (a payee added or removed whole reads as one line) and checks the chain: every entry signed by this wallet, unchanged since, in order, nothing removed, and the rules sealed now are the last entry. An edit to the file shows up as a problem. Notification tokens and webhook URLs are kept only as a short fingerprint, so a new token still shows as a change without the secret being stored. The history starts with the first seal after you update.
+
 ### Dry runs and grants
 
 `reinpay check <payee> <amount> [token]`, and the `check_payment` tool for the agent, say what would happen to a payment right now: blocked (and by which rule), waiting for you, ready, or sent. If the rules would let it through, it is simulated on mainnet too. Nothing is recorded, nothing counts against a budget, and the circuit breaker does not see it, so an agent can plan without getting blocked.
@@ -323,6 +331,7 @@ Everything is in `~/.reinpay` (or `$REINPAY_HOME`), readable by you only:
 - `passphrase`: only while unlocked.
 - `config.json`: rules, payees and notification settings (a Telegram bot token, if you set one).
 - `receipts.json`: every request and what happened to it.
+- `rules-history.json`: every change to the rules and payees, signed and chained (notification secrets only as a fingerprint).
 
 Nothing is sent anywhere except to the Robinhood Chain RPC (`https://rpc.mainnet.chain.robinhood.com`, or `REINPAY_RPC`).
 
@@ -350,7 +359,7 @@ The repeat guard is 10 minutes, and `autosend` is off. A token with no daily bud
 npm test
 ```
 
-`test/rules.test.mjs` checks every rule offline, `test/lock.test.mjs` the spend lock (including two processes), `test/report.test.mjs` the spending report, `test/notify.test.mjs` the owner notifications, `test/csv.test.mjs` the CSV export and `test/profile.test.mjs` the profiles, `test/seal.test.mjs` the config seal and unlock, `test/guard.test.mjs` the lookalike guard, `test/verify.test.mjs` the on-chain receipt check and `test/doctor.test.mjs` the checkup and `test/freeze.test.mjs` the freeze, the circuit breaker and expiring payees, `test/paper.test.mjs` statements, the first-payment rule and the digest, `test/plan.test.mjs` grants, dry runs and backup/restore, `test/share.test.mjs` shared payee lists, signed webhooks and read-only MCP, `test/smart.test.mjs` category budgets, payment hours and the per-hour cap, `test/bills.test.mjs` payment links, schedules and budget alerts, `test/failclosed.test.mjs` the token-contract check when the chain cannot be read, `test/approvals.test.mjs` the memo rule and expiring requests, `test/fleet.test.mjs` the view across profiles, and `test/usd.test.mjs` the two-pool price and the dollar limits. `test/proof.test.mjs` payee proofs. `test/sharereceipt.test.mjs` shared receipts.  `test/review.test.mjs` the rule review.  `test/session.test.mjs` session budgets. `test/search.test.mjs` receipt filters. `test/htmlreport.test.mjs` the HTML report. `test/cosign.test.mjs` two-person approval. `test/fee.test.mjs` the max fee. `test/books.test.mjs` the monthly books. `test/retry.test.mjs` notification retries. `test/memos.test.mjs` memo privacy. `test/connect.test.mjs` host snippets and the server check. `test/update.test.mjs` the version check and changelog. `test/explain.test.mjs` check --explain. `test/planlist.test.mjs` plans. `test/today.test.mjs` the today screen. `test/payeecheck.test.mjs` the payee check. `test/live.mjs` runs on mainnet:
+`test/rules.test.mjs` checks every rule offline, `test/lock.test.mjs` the spend lock (including two processes), `test/report.test.mjs` the spending report, `test/notify.test.mjs` the owner notifications, `test/csv.test.mjs` the CSV export and `test/profile.test.mjs` the profiles, `test/seal.test.mjs` the config seal and unlock, `test/guard.test.mjs` the lookalike guard, `test/verify.test.mjs` the on-chain receipt check and `test/doctor.test.mjs` the checkup and `test/freeze.test.mjs` the freeze, the circuit breaker and expiring payees, `test/paper.test.mjs` statements, the first-payment rule and the digest, `test/plan.test.mjs` grants, dry runs and backup/restore, `test/share.test.mjs` shared payee lists, signed webhooks and read-only MCP, `test/smart.test.mjs` category budgets, payment hours and the per-hour cap, `test/bills.test.mjs` payment links, schedules and budget alerts, `test/failclosed.test.mjs` the token-contract check when the chain cannot be read, `test/approvals.test.mjs` the memo rule and expiring requests, `test/fleet.test.mjs` the view across profiles, and `test/usd.test.mjs` the two-pool price and the dollar limits. `test/proof.test.mjs` payee proofs. `test/sharereceipt.test.mjs` shared receipts.  `test/review.test.mjs` the rule review.  `test/session.test.mjs` session budgets. `test/search.test.mjs` receipt filters. `test/htmlreport.test.mjs` the HTML report. `test/cosign.test.mjs` two-person approval. `test/fee.test.mjs` the max fee. `test/books.test.mjs` the monthly books. `test/retry.test.mjs` notification retries. `test/memos.test.mjs` memo privacy. `test/connect.test.mjs` host snippets and the server check. `test/update.test.mjs` the version check and changelog. `test/explain.test.mjs` check --explain. `test/planlist.test.mjs` plans. `test/today.test.mjs` the today screen. `test/payeecheck.test.mjs` the payee check. `test/addcheck.test.mjs` the check inside payee add. `test/history.test.mjs` the rules history. `test/live.mjs` runs on mainnet:
 
 - USDG transfer simulations from a public holder, and tampered ones that must be refused;
 - the full flow with a throwaway wallet that has a pretend ETH balance only inside the simulation;
@@ -362,7 +371,7 @@ npm test
 - `doctor` against the real RPC, and the lookalike guard;
 - the agent freezing the wallet over MCP, and its next request blocked;
 - statements built from a real public payment: one with the wrong signer and one claiming someone else's payment, both refused;
-- a dry run simulated on mainnet that records nothing, `check_payment` over MCP, `check --explain` with the simulation as its last step, a `check --plan` whose repeat is held, `today` with balances from the chain, and `payee check` on the USDG contract;
+- a dry run simulated on mainnet that records nothing, `check_payment` over MCP, `check --explain` with the simulation as its last step, a `check --plan` whose repeat is held, `today` with balances from the chain, `payee check` on the USDG contract, and `payee add` asking first about a fresh address;
 - the read-only MCP server over stdio, and a shared payee list whose token contract is still refused;
 - a category budget on the real payment path, before and after the mainnet simulation;
 - a payment link and a scheduled payment through the real payment path, and `read_payment_link` over MCP;

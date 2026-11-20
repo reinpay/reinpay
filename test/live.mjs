@@ -71,6 +71,8 @@ const tdy = await P.todayView();
 check("today: balances read from the chain and the waiting payments listed", tdy.lines.some((l) => l.includes("read from Robinhood Chain now")) && tdy.data.waiting.length >= 1, `${tdy.data.waiting.length} waiting`);
 const pck = await P.checkPayeeAddress("0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168");
 check("payee check: the USDG contract is read as a token contract and refused", pck.token === "USDG" && pck.verdict === "stop" && pck.next === null, pck.kind);
+{ const { addStep } = await import("../src/payeecheck.js"); const fresh = await P.checkPayeeAddress("0x0000000000000000000000000000000000c0ffee");
+  check("payee add: a fresh address read from the chain would ask the owner first", addStep(fresh) === "ask" && fresh.nonce === 0, fresh.kind); }
 const r2 = await rq("Test payee", "0.0005");
 check("the same payment again is held by the repeat guard", r2.status === "needs_approval" && r2.rule === "repeat guard");
 const r3 = await rq("Test payee", "0.0015");

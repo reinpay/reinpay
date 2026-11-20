@@ -26,6 +26,7 @@ const HELP = `reinpay ${pkg.version} - a wallet for AI agents that only spends i
   reinpay unlock [--for=12h] | lock        Store (for a while) or remove the passphrase file the server signs with
   reinpay seal                             Check your rules, then seal them with your wallet key
   reinpay rules                            Show the rules
+  reinpay rules history [--last=10] [--json]   Every change to the rules and payees, signed and chained; checks the chain
   reinpay rule <name> <token> <amount>     Set daily | weekly | monthly | max | approve-above for a token, e.g. reinpay rule daily USDG 50
                                            (weekly and monthly accept "off"; weeks start on Monday, local time)
   reinpay rule repeat-guard <minutes>      Hold repeats of the same payment for that long (0 turns it off)
@@ -53,7 +54,8 @@ const HELP = `reinpay ${pkg.version} - a wallet for AI agents that only spends i
   reinpay freeze [reason] [--all]          Stop every payment now (requests, autosend, approvals); --all: every profile
   reinpay unfreeze [--all]                 Start again after checking reinpay receipts. Terminal only.
   reinpay autosend <on|off>                Send payments that are inside every rule without asking (needs unlock)
-  reinpay payee add <name> <0xaddress> [--tokens=USDG,ETH] [--note=...] [--until=30d]
+  reinpay payee add <name> <0xaddress> [--tokens=USDG,ETH] [--note=...] [--until=30d] [--yes] [--no-check]
+                                           Runs payee check first; asks before adding a fresh address or a contract
   reinpay payee until <name> <30d|12h|off> A payee that expires on its own
   reinpay payee export [--out=file.json]   Your payee list, signed with your wallet key, to share
   reinpay payee import <file.json>         Add payees from a signed list, after the same checks as payee add
@@ -242,6 +244,16 @@ async function main() {
   if (cmd === "lock") { K.lock(); return console.log("Locked. The passphrase file is removed."); }
   if (cmd === "export") { requireTTY("export"); console.log(K.exportKey(await ask("Passphrase (hidden): ", { hidden: true }))); return; }
   if (cmd === "status") { const st = await P.walletStatus(); st.configSeal = await P.sealStatus(); st.unlockedUntil = K.isUnlocked() ? (K.unlockedUntil() ? new Date(K.unlockedUntil()).toISOString() : "until reinpay lock") : null; st.frozen = (await import("../src/freeze.js")).frozen(); return console.log(JSON.stringify(st, null, 2)); }
+  if (cmd === "rules" && pos[0] === "history") {
+    const H = await import("../src/history.js");
+    const h = H.loadHistory(), v = await H.verifyHistory(h, P.requireWallet(), C.loadConfig());
+    if (flags.has("--json")) return console.log(JSON.stringify({ ok: v.ok, problems: v.problems, entries: (h || []).map(({ body, sig, ...e }) => e) }, null, 2));
+    if (!h || !h.length) return console.log("No history yet. It starts with the next change you make (reinpay rule, payee, notify, ...).");
+    const last = Number(opt("last") || 10);
+    console.log(`Rules history: ${h.length} entr${h.length === 1 ? "y" : "ies"}${h.length > last ? `, the last ${last}` : ""}.`);
+    for (const l of H.historyLines(h, { last })) console.log(l);
+    return console.log(v.ok ? `\nEvery entry is signed by this wallet and follows the one before it. The rules sealed now are the last entry.` : `\nProblems:\n${v.problems.map((p) => "  " + p).join("\n")}`);
+  }
   if (cmd === "rules") return console.log(JSON.stringify(P.rulesView(), null, 2));
   if (cmd === "today") { const t = await P.todayView(); return console.log(flags.has("--json") ? JSON.stringify(t.data, null, 2) : t.lines.join("\n")); }
 
@@ -371,6 +383,24 @@ async function main() {
       const tokens = opt("tokens") ? opt("tokens").toUpperCase().split(",") : undefined;
       let p;
       const untilMs = opt("until") ? (await import("../src/rules.js")).parseDuration(opt("until")) : null;
+      if (!flags.has("--no-check")) { // v0.34's payee check runs first, so the owner sees what the address is before it is added
+        const { addStep } = await import("../src/payeecheck.js");
+        let v = null;
+        try { v = await P.checkPayeeAddress(address); }
+        catch (e) {
+          if (/not a valid 0x address/.test(e.message)) throw e;
+          console.log(`Could not check ${address} on Robinhood Chain (${e.message}).`);
+          if ((await ask("Add it without the check? Type yes: ")).trim().toLowerCase() !== "yes") { console.log("Not added. Nothing changed."); process.exit(1); }
+        }
+        if (v) {
+          console.log(`Checking ${v.address} before adding it as "${name}":`);
+          for (const l of v.lines) if (!l.startsWith("To add")) console.log(l === "" || /^(Looks|Be|Do)/.test(l) ? l : "  " + l);
+          const step = addStep(v, { yes: flags.has("--yes") });
+          if (step === "stop") { console.log("Not added. Nothing changed."); process.exit(1); }
+          if (step === "ask" && (await ask("Add it anyway? Type yes: ")).trim().toLowerCase() !== "yes") { console.log("Not added. Nothing changed."); process.exit(1); }
+          if (step !== "lookalike") console.log("");
+        }
+      }
       try { p = await P.addPayee({ name, address, tokens, note: opt("note"), untilMs }); }
       catch (e) {
         if (e.code !== "LOOKALIKE") throw e;
@@ -733,8 +763,10 @@ const MUTATING = ["rule", "autosend"].includes(cmd) || (cmd === "notify" && pos[
 async function reseal(passphrase) {
   const K = await import("../src/keystore.js"), C = await import("../src/config.js"), { sealConfig } = await import("../src/seal.js");
   const pass = passphrase ?? (K.isUnlocked() ? undefined : await ask("Passphrase to seal your rules (hidden): ", { hidden: true }));
-  const sealed = await sealConfig(C.loadConfig(), K.loadAccount(pass));
+  const account = K.loadAccount(pass);
+  const sealed = await sealConfig(C.loadConfig(), account);
   C.saveConfig(sealed);
-  console.log(`Rules sealed with your wallet key (${sealed.seal.at}).`);
+  const e = await (await import("../src/history.js")).recordSeal(sealed, account); // v0.36: one signed entry per change
+  console.log(`Rules sealed with your wallet key (${sealed.seal.at}).${e ? ` History: ${e.changes.length} change${e.changes.length === 1 ? "" : "s"} recorded.` : ""}`);
 }
 main().then(() => (MUTATING ? reseal() : null)).catch((e) => { console.error(e?.shortMessage || e?.message || e); process.exit(1); });

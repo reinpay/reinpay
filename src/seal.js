@@ -6,9 +6,13 @@ import { keccak256, toBytes, recoverMessageAddress, getAddress } from "viem";
 const canon = (v) => (Array.isArray(v) ? v.map(canon) : v && typeof v === "object" ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, canon(v[k])])) : v);
 
 /** The text that is signed: a fixed label plus the hash of everything that decides a payment. */
+/** Everything that decides a payment, the part of the config the seal covers. */
+export const sealBody = (cfg) => ({ rules: cfg.rules || {}, payees: cfg.payees || [], tokens: cfg.tokens || [], notify: cfg.notify || null, ...(cfg.schedules?.length ? { schedules: cfg.schedules } : {}) });
+export const bodyHash = (body) => keccak256(toBytes(JSON.stringify(canon(body))));
+export { canon };
+
 export function sealMessage(cfg) {
-  const body = { rules: cfg.rules || {}, payees: cfg.payees || [], tokens: cfg.tokens || [], notify: cfg.notify || null, ...(cfg.schedules?.length ? { schedules: cfg.schedules } : {}) };
-  return "Reinpay config seal v1\n" + keccak256(toBytes(JSON.stringify(canon(body))));
+  return "Reinpay config seal v1\n" + bodyHash(sealBody(cfg));
 }
 
 export async function sealConfig(cfg, account) {

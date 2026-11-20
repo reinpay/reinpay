@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.36.0 (unreleased): rules history
+
+- Every seal adds a signed, chained entry to `rules-history.json` with what changed. `reinpay rules history [--last=N] [--json]` lists them and checks the signatures, the chain and that the rules sealed now are the last entry. Notification secrets are stored only as a fingerprint.
+- Tests: 14 checks offline.
+
+## 0.35.0 (unreleased): payee add checks first
+
+- `reinpay payee add` runs `payee check` first: a wallet with a history is added, a fresh address or a contract asks for `yes` (or `--yes`), a token contract or your own wallet is refused, a lookalike goes to the lookalike guard. `--no-check` skips it.
+- Tests: 7 checks offline and 1 live check.
+
 ## 0.34.0 (unreleased): payee check
 
 - `reinpay payee check <0xaddress> [--json]`: wallet or contract, history, balances, Sourcify, already on the list, lookalikes; then looks fine, be careful or do not add, with the reason. Read-only.
