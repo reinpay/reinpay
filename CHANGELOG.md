@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.51.0 (unreleased): Reinpay Lab
+
+- `reinpay lab run [--out=] [--json]`: seven scams against five rule sets on throwaway wallets, real rules and real mainnet simulations, nothing signed; wording drawn from a block hash; each cell paid, held or blocked with the deciding rule.
+- Tests: 11 checks offline.
+
 ## 0.50.0 (unreleased): selftest
 
 - `reinpay selftest [--live] [--json]`: Reinpay's own tests, run on this computer, each in its own process with a temporary home. The `test` folder now ships with the install.

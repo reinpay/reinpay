@@ -13,6 +13,7 @@ const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url),
 const HELP = `reinpay ${pkg.version} - a wallet for AI agents that only spends inside your rules (Robinhood Chain mainnet, chain id 4663)
 
   reinpay sandbox                          Try Reinpay with no money: real rules, real mainnet simulation, pretend balance
+  reinpay lab run [--out=run.json] [--json]   Reinpay Lab: scams against throwaway wallets with five rule sets, nothing signed
   reinpay connect <claude|cursor|vscode|windsurf|codex> [--read-only] [--session=USDG:5]   The snippet to add Reinpay to your agent host
   reinpay prompt [--read-only] [--out=file.md]   Instructions to paste into your agent: how to use the tools safely, and your rules in plain words
   reinpay mcp --check                      Start the MCP server the way a host does, and list its tools
@@ -332,6 +333,15 @@ async function main() {
     console.log(`\n${r.files} files, ${r.pass} checks passed, ${r.fail} failed, in ${r.seconds} s. ${r.ok ? "Reinpay works on this computer." : "Something is wrong: run the failing file with node to see more."}`);
     if (!r.ok) process.exit(1);
     return;
+  }
+  if (cmd === "lab" && pos[0] === "run") {
+    const { runLab, ROWS } = await import("../src/lab.js");
+    const json = flags.has("--json"), out = opt("out");
+    if (!json) console.log("Reinpay Lab: every attack against every rule set, on throwaway wallets. Real rules, real mainnet simulations, nothing signed.");
+    const run = await runLab({ onCell: (c, row, a) => { if (!json) console.log(`  ${row.label.padEnd(9)} ${a.label.padEnd(18)} ${c.outcome.toUpperCase().padEnd(8)} ${c.rule || (c.outcome === "paid" ? "rules let it through" : "")}${c.requests > 1 ? `  [${c.paid} paid, ${c.held} held, ${c.blocked} blocked of ${c.requests}]` : ""}${c.voided ? ` (${c.voided} void)` : ""}`); } });
+    if (out) { const { writeFileSync: wf } = await import("node:fs"); wf(out, JSON.stringify(run, null, 1) + "\n"); }
+    if (json) return console.log(JSON.stringify(run, null, 2));
+    return console.log(`\nBlock ${run.block}. ${run.totals.blocked} blocked, ${run.totals.held} held for the owner, ${run.totals.paid} would pay, ${run.totals.void} void.${out ? ` Written to ${out}.` : ""}`);
   }
   if (cmd === "headroom") { const h = await P.headroomView(); if (flags.has("--json")) return console.log(JSON.stringify(h.rows, null, 2)); console.log("What the agent could ask for right now, per payee:"); for (const l of h.lines) console.log(l); return console.log("\nWorked out by the same rules that decide every payment. The repeat guard is left out: it is about one exact amount."); }
   if (cmd === "today") { const t = await P.todayView(); return console.log(flags.has("--json") ? JSON.stringify(t.data, null, 2) : t.lines.join("\n")); }
