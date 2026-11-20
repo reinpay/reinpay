@@ -227,6 +227,46 @@ export async function previewPayment({ payee, amount, token = "USDG", memo, expl
   return out(wouldBe, d.rule, wouldBe === "ready" ? `${d.reason} It would wait for the owner because autoSend is ${cfg.rules.autoSend ? "on but the wallet is locked" : "off"}.` : d.reason, { simulation: simView(ch.sim, ch.feeWei) });
 }
 
+/**
+ * reinpay check --plan: a list of payments, checked in order as if the agent asked for all of them now. Each one sees the
+ * ones before it (as waiting payments), so budgets, the repeat guard and the per-hour cap add up the way they would for real.
+ * Payments the rules let through are simulated on mainnet one by one. Nothing is recorded, nothing is signed.
+ */
+export const PLAN_MAX = 50;
+export async function previewPlan(items, { _check = check } = {}) { // _check: tests only, to run offline
+  if (!Array.isArray(items) || items.length === 0) throw new Error("The plan must be a JSON list of payments: [{\"payee\": \"Weather API\", \"amount\": \"0.0005\", \"token\": \"ETH\"}, ...]");
+  if (items.length > PLAN_MAX) throw new Error(`A plan can hold at most ${PLAN_MAX} payments.`);
+  const from = requireWallet();
+  const cfg = loadConfig();
+  syncTokens(cfg);
+  const fz = frozen();
+  const now = Date.now(), real = allReceipts(), planned = [], out = [];
+  for (const [i, it] of items.entries()) {
+    const n = i + 1, memo = it?.memo === undefined ? undefined : String(it.memo);
+    const row = (wouldBe, rule, reason, extra = {}) => { const r = { n, payee: String(it?.payee ?? ""), amount: String(it?.amount ?? ""), token: String(it?.token || "USDG"), wouldBe, rule, reason, ...extra }; out.push(r); return r; };
+    let symbol, amountRaw, p;
+    try { symbol = tokenOf(String(it?.token || "USDG")).symbol; amountRaw = parseAmount(String(it?.amount ?? ""), symbol); }
+    catch (e) { row("blocked", "amount", e.message); continue; }
+    p = findPayee(cfg.payees, String(it?.payee ?? ""));
+    if (fz) { row("blocked", "frozen", `Reinpay is frozen (${fz.reason}).`); continue; }
+    if (p && p.isContract !== false) { const tok = await tokenAt(p.address); if (tok) { row("blocked", "token contract", `${p.name} is the contract of ${tok}.`); continue; } }
+    const usd = await usdFor(cfg, symbol, amountRaw);
+    const d = decide({ rules: memo === undefined ? { ...cfg.rules, memoMin: 0 } : cfg.rules, receipts: [...real, ...planned], request: { payee: p, token: symbol, amountRaw, memo, usdRaw: usd.usdRaw, usdReason: usd.usdReason }, now });
+    if (d.status === "blocked") { row("blocked", d.rule, d.reason); continue; }
+    const ch = await _check(from, symbol, p.address, amountRaw, cfg.rules);
+    if (ch.problem) { row("blocked", ch.rule || "simulation", `Simulated on mainnet: ${ch.problem}.`, { simulation: simView(ch.sim) }); continue; }
+    const wouldBe = d.status === "needs_approval" ? "needs_approval" : "ready";
+    row(wouldBe, d.rule, d.reason, { payee: p.name, amount: fmt(amountRaw, symbol).split(" ")[0], token: symbol, simulation: simView(ch.sim, ch.feeWei) });
+    // From here on the next payments see this one as waiting, the way a real request would count.
+    planned.push({ id: `plan line ${n}`, payeeAddress: p.address, token: symbol, amountRaw: amountRaw.toString(), createdAt: now, status: wouldBe, ...(p.category ? { category: p.category } : {}), ...(usd.usdRaw ? { usdRaw: usd.usdRaw } : {}) });
+  }
+  const count = (w) => out.filter((r) => r.wouldBe === w).length;
+  const totals = {};
+  for (const r of out) if (r.wouldBe !== "blocked") totals[r.token] = (totals[r.token] ?? 0n) + parseAmount(r.amount, r.token);
+  return { dryRun: true, payments: out, summary: { ready: count("ready"), needsApproval: count("needs_approval"), blocked: count("blocked"), wouldGoThrough: Object.fromEntries(Object.entries(totals).map(([t, v]) => [t, fmt(v, t)])) },
+    note: "Each payment was checked as if the ones before it were waiting. Payments that pass the rules were simulated on mainnet one at a time, from today's balance, not one after another. Nothing was recorded or signed." };
+}
+
 /** Waiting payments older than rules.expireAfterMinutes become "expired", so they stop holding today's budget. */
 export function expireStale(rules, now = Date.now()) {
   const m = Number(rules?.expireAfterMinutes || 0);
@@ -351,6 +391,21 @@ export async function walletStatus() {
   return { address: a, chainId: CHAIN_ID, explorer: addrLink(a), balances: Object.fromEntries(Object.entries(b).map(([s, v]) => [s, fmt(v, s).split(" ")[0]])), ...rulesView() };
 }
 
+/** reinpay today: the owner's one-screen summary. The balances are read from the chain; if that fails, the rest still shows. */
+export async function todayView(now = Date.now()) {
+  const a = requireWallet();
+  const cfg = loadConfig();
+  syncTokens(cfg);
+  expireStale(cfg.rules, now);
+  let b = null, balanceError = null;
+  try { b = await balances(a); } catch (e) { balanceError = e?.shortMessage || e?.message || "unreachable"; }
+  const S = await import("./schedule.js"), st = S.loadState();
+  const { today } = await import("./today.js");
+  const out = today({ cfg, receipts: allReceipts(), balances: b, frozen: frozen(), schedules: cfg.schedules || [], nextOf: (x) => S.nextOf(x, st), now });
+  if (balanceError) out.lines.splice(out.lines.findIndex((l) => l.includes("█ sent")) + 1, 0, `  Wallet: could not read balances from Robinhood Chain (${balanceError}).`);
+  return out;
+}
+
 // ---- payees (owner only, from the CLI) ----
 export async function addPayee({ name, address, tokens, note, maxPerPayment, allowLookalike = false, untilMs = null }) {
   syncTokens();
@@ -402,6 +457,25 @@ export function setPayeeLimit(name, kind, token, amount) {
   }
   saveConfig(cfg);
   return p;
+}
+
+/** reinpay payee check: read an address from Robinhood Chain before it becomes a payee. Read-only. */
+export async function checkPayeeAddress(address, { fetch: f } = {}) {
+  if (!isAddress(String(address || ""))) throw new Error(`"${address}" is not a valid 0x address.`);
+  const a = getAddress(address), cfg = loadConfig();
+  syncTokens(cfg);
+  const c = publicClient();
+  let me = null; try { me = requireWallet(); } catch {}
+  const [code, nonce, bal] = await Promise.all([c.getCode({ address: a }), c.getTransactionCount({ address: a }), balances(a)]);
+  const hasCode = !!code && code !== "0x";
+  const token = hasCode ? await tokenAt(a) : null;
+  let sourcify; if (hasCode && !token) { try { sourcify = await sourcifyMatch(a, f); } catch { sourcify = undefined; } }
+  const { findLookalike } = await import("./lookalike.js"), { payeeVerdict } = await import("./payeecheck.js");
+  const known = [...cfg.payees, ...(me ? [{ name: "your wallet", address: me }] : [])];
+  const onList = cfg.payees.find((p) => getAddress(p.address) === a)?.name || null;
+  const facts = { address: a, own: me ? getAddress(me) === a : false, onList, lookalike: findLookalike(a, known), code: hasCode, token, sourcify, nonce,
+    balances: Object.fromEntries(["ETH", "USDG"].map((t) => [t, fmt(bal[t] ?? 0n, t).split(" ")[0]])) };
+  return { ...facts, ...payeeVerdict(facts) };
 }
 
 // ---- extra tokens (owner only, from the CLI) ----

@@ -22,6 +22,7 @@ const HELP = `reinpay ${pkg.version} - a wallet for AI agents that only spends i
   reinpay init [--import]                  Create (or import) the encrypted wallet. Terminal only.
   reinpay address                          Print the wallet address
   reinpay status                           Balances, budgets left today and the rules
+  reinpay today [--json]                   One screen: budget bars per token, what waits for you, blocks, next bills, brakes
   reinpay unlock [--for=12h] | lock        Store (for a while) or remove the passphrase file the server signs with
   reinpay seal                             Check your rules, then seal them with your wallet key
   reinpay rules                            Show the rules
@@ -48,6 +49,7 @@ const HELP = `reinpay ${pkg.version} - a wallet for AI agents that only spends i
   reinpay grant list | clear               Show or remove grants
   reinpay check <payee> <amount> [token]   Dry run: what would happen to this payment now (nothing recorded or signed)
   reinpay check <payee> <amount> [token] --explain   The same, with every rule in order and the one that decided
+  reinpay check --plan=payments.json      A list of payments checked in order, as if all were asked for now (nothing recorded)
   reinpay freeze [reason] [--all]          Stop every payment now (requests, autosend, approvals); --all: every profile
   reinpay unfreeze [--all]                 Start again after checking reinpay receipts. Terminal only.
   reinpay autosend <on|off>                Send payments that are inside every rule without asking (needs unlock)
@@ -55,6 +57,7 @@ const HELP = `reinpay ${pkg.version} - a wallet for AI agents that only spends i
   reinpay payee until <name> <30d|12h|off> A payee that expires on its own
   reinpay payee export [--out=file.json]   Your payee list, signed with your wallet key, to share
   reinpay payee import <file.json>         Add payees from a signed list, after the same checks as payee add
+  reinpay payee check <0xaddress>         Read an address from the chain before you add it: wallet or contract, history, Sourcify, lookalikes
   reinpay payee list | remove <name> | off <name> | on <name>
   reinpay payee limit <name> <daily|max> <USDG|ETH> <amount|off>   A payee's own daily budget or max per payment
   reinpay pending                          Payments waiting for you
@@ -240,6 +243,7 @@ async function main() {
   if (cmd === "export") { requireTTY("export"); console.log(K.exportKey(await ask("Passphrase (hidden): ", { hidden: true }))); return; }
   if (cmd === "status") { const st = await P.walletStatus(); st.configSeal = await P.sealStatus(); st.unlockedUntil = K.isUnlocked() ? (K.unlockedUntil() ? new Date(K.unlockedUntil()).toISOString() : "until reinpay lock") : null; st.frozen = (await import("../src/freeze.js")).frozen(); return console.log(JSON.stringify(st, null, 2)); }
   if (cmd === "rules") return console.log(JSON.stringify(P.rulesView(), null, 2));
+  if (cmd === "today") { const t = await P.todayView(); return console.log(flags.has("--json") ? JSON.stringify(t.data, null, 2) : t.lines.join("\n")); }
 
   if (cmd === "rule") {
     requireTTY("rule");
@@ -324,6 +328,13 @@ async function main() {
   if (cmd === "payee") {
     const [sub, name, address] = pos;
     if (sub === "list" || !sub) return console.log(JSON.stringify(C.loadConfig().payees, null, 2));
+    if (sub === "check") {
+      if (!name) throw new Error("Usage: reinpay payee check <0xaddress>");
+      const v = await P.checkPayeeAddress(name);
+      if (flags.has("--json")) return console.log(JSON.stringify(v, null, 2));
+      console.log(`Checking ${v.address} on Robinhood Chain mainnet:`); for (const l of v.lines) console.log(l.startsWith("To add") || l === "" || /^(Looks|Be|Do)/.test(l) ? l : "  " + l);
+      return console.log("Nothing was added or changed.");
+    }
     if (sub === "export") {
       const { exportPayees } = await import("../src/payeeshare.js");
       const { writeFileSync: wf, existsSync: ex } = await import("node:fs");
@@ -519,6 +530,18 @@ async function main() {
   }
   if (cmd === "check") {
     const [payee, amount, token] = pos;
+    if (opt("plan")) {
+      const { readFileSync: rf } = await import("node:fs");
+      let items; try { items = JSON.parse(rf(opt("plan"), "utf8")); } catch { throw new Error(`${opt("plan")} is not a readable JSON file.`); }
+      const pl = await P.previewPlan(items);
+      if (flags.has("--json")) return console.log(JSON.stringify(pl, null, 2));
+      const W = { ready: "READY", needs_approval: "WAITS", blocked: "BLOCKED" };
+      console.log(`Plan of ${pl.payments.length} payments, checked in order as if all were asked for now:`);
+      const pw = Math.max(...pl.payments.map((r) => r.payee.length)), aw = Math.max(...pl.payments.map((r) => `${r.amount} ${r.token}`.length));
+      for (const r of pl.payments) console.log(`  ${String(r.n).padStart(2)}. ${`${r.amount} ${r.token}`.padEnd(aw)}  ${r.payee.padEnd(pw)}  ${W[r.wouldBe].padEnd(8)} ${r.rule}${r.wouldBe === "ready" ? "" : `: ${r.reason}`}${r.simulation?.block ? `  (simulated, block ${r.simulation.block})` : ""}`);
+      const s = pl.summary, through = Object.values(s.wouldGoThrough).join(", ") || "nothing";
+      return console.log(`\n${s.ready} ready, ${s.needsApproval} would wait for you, ${s.blocked} blocked. Would go through: ${through}.\nEach simulated from today's balance, one at a time. Nothing was recorded or signed.`);
+    }
     if (!payee || !amount) throw new Error("Usage: reinpay check <payee> <amount> [token] [--explain]");
     const v = await P.previewPayment({ payee, amount, token: token || "USDG", explain: flags.has("--explain") });
     if (v.steps && !flags.has("--json")) { const { explainLines } = await import("../src/explain.js"); console.log(`Every rule, in order, for ${v.amount} ${v.token} to ${v.payee}:`); for (const l of explainLines(v.steps)) console.log(l); console.log(""); }

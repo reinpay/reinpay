@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.34.0 (unreleased): payee check
+
+- `reinpay payee check <0xaddress> [--json]`: wallet or contract, history, balances, Sourcify, already on the list, lookalikes; then looks fine, be careful or do not add, with the reason. Read-only.
+- Tests: 9 checks offline and 1 live check.
+
+## 0.33.0 (unreleased): today
+
+- `reinpay today [--json]`: budget bars per token (sent, waiting, left), balances from the chain, waiting payments with why and age, blocked today per rule, next bills and the brakes. Read-only.
+- Tests: 9 checks offline and 1 live check.
+
+## 0.32.0 (unreleased): plans
+
+- `reinpay check --plan=payments.json [--json]`: up to 50 payments checked in order as if all were asked for now; each sees the ones before it, so budgets, the repeat guard and the per-hour cap add up. Payments that pass the rules are simulated on mainnet. Nothing is recorded or signed.
+- Tests: 12 checks offline and 1 live check.
+
 ## 0.31.0 (unreleased): why, rule by rule
 
 - `reinpay check <payee> <amount> [token] --explain`: every rule in order with what it found (✓ ✗ ⏸ ·), the one that decided marked, the rest after a block or hold shown as not reached, and the mainnet simulation as the last line.

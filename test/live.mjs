@@ -65,6 +65,12 @@ check("the receipt the agent sees has no transaction data", r1.tx === undefined)
 const pvx = await P.previewPayment({ payee: "Test payee", amount: "0.0004", token: "ETH", explain: true });
 const lastx = pvx.steps?.[pvx.steps.length - 1];
 check("check --explain: every rule listed, the mainnet simulation last, nothing recorded", pvx.steps?.length > 15 && lastx.rule === "simulation" && lastx.state === "pass" && /at block \d+/.test(lastx.detail) && (await import("../src/receipts.js")).allReceipts().length === nBefore, lastx && lastx.detail);
+const plx = await P.previewPlan([{ payee: "Test payee", amount: "0.0004", token: "ETH" }, { payee: "Test payee", amount: "0.0004", token: "ETH" }]);
+check("check --plan: the first simulated on mainnet, the repeat held, nothing recorded", plx.payments[0].simulation?.ok && plx.payments[1].rule === "repeat guard" && (await import("../src/receipts.js")).allReceipts().length === nBefore, plx.payments[0].simulation && `block ${plx.payments[0].simulation.block}`);
+const tdy = await P.todayView();
+check("today: balances read from the chain and the waiting payments listed", tdy.lines.some((l) => l.includes("read from Robinhood Chain now")) && tdy.data.waiting.length >= 1, `${tdy.data.waiting.length} waiting`);
+const pck = await P.checkPayeeAddress("0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168");
+check("payee check: the USDG contract is read as a token contract and refused", pck.token === "USDG" && pck.verdict === "stop" && pck.next === null, pck.kind);
 const r2 = await rq("Test payee", "0.0005");
 check("the same payment again is held by the repeat guard", r2.status === "needs_approval" && r2.rule === "repeat guard");
 const r3 = await rq("Test payee", "0.0015");
