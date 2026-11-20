@@ -5,7 +5,7 @@ import { keccak256, toBytes, recoverMessageAddress, getAddress, isAddress } from
 import { looksLike } from "./lookalike.js";
 
 const canon = (v) => (Array.isArray(v) ? v.map(canon) : v && typeof v === "object" ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, canon(v[k])])) : v);
-const KEEP = ["name", "address", "tokens", "note", "maxPerPayment", "daily", "expiresAt", "category"]; // a proof is tied to one wallet, so it is never shared
+const KEEP = ["name", "address", "tokens", "note", "maxPerPayment", "daily", "approveAbove", "cooldownMinutes", "expiresAt", "category"]; // a proof is tied to one wallet, so it is never shared
 
 export function payeeListMessage(f) {
   const { signature, ...body } = f;

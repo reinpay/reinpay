@@ -1,0 +1,24 @@
+// v0.45: payments per day, offline.
+import { parseUnits } from "viem";
+import { decide } from "../src/rules.js";
+import { explain } from "../src/explain.js";
+import { headroom } from "../src/headroom.js";
+let pass = 0, fail = 0;
+const check = (label, cond, info = "") => { cond ? pass++ : fail++; console.log(`${cond ? "PASS" : "FAIL"} ${label}${info ? ` (${info})` : ""}`); };
+const NOW = new Date(2026, 10, 20, 15, 0, 0).getTime(), eth = (x) => parseUnits(String(x), 18);
+const W = "0x000000000000000000000000000000000000dEaD", G = "0x00000000000000000000000000000000DeaDBeef";
+const rules = { daily: { ETH: 0.005 }, maxPerPayment: { ETH: 0.002 }, approveAbove: { ETH: 0.001 }, maxPerDay: 2 };
+const weather = { name: "Weather API", address: W }, gpu = { name: "GPU credits", address: G };
+const rc = (o) => ({ id: "RP-1", payeeAddress: W, token: "ETH", amountRaw: eth("0.0005").toString(), createdAt: NOW - 3_600_000, status: "ready", ...o });
+const D = (receipts, payee = weather) => decide({ rules, receipts, request: { payee, token: "ETH", amountRaw: eth("0.0003") }, now: NOW });
+check("under the count: allowed", D([rc({})]).status === "allowed");
+const two = [rc({}), rc({ id: "RP-2", payeeAddress: G, status: "sent" })];
+const d = D(two);
+check("two today (one sent, one waiting) with a limit of 2: blocked, any payee", d.status === "blocked" && d.rule === "payments per day" && D(two, gpu).rule === "payments per day", d.reason);
+check("blocked and rejected ones do not count", D([rc({ status: "blocked" }), rc({ id: "RP-2", status: "rejected" })]).status === "allowed");
+check("yesterday's do not count", D([rc({ createdAt: new Date(2026, 10, 19, 23, 0).getTime() }), rc({ id: "RP-2", createdAt: new Date(2026, 10, 19, 22, 0).getTime() })]).status === "allowed");
+check("0 or unset turns it off", decide({ rules: { ...rules, maxPerDay: 0 }, receipts: two, request: { payee: weather, token: "ETH", amountRaw: eth("0.0003") }, now: NOW }).status === "allowed");
+check("check --explain marks it as the deciding rule", explain({ rules, receipts: two, request: { payee: weather, token: "ETH", amountRaw: eth("0.0003") }, now: NOW }).steps.find((s) => s.decided)?.rule === "payments per day");
+check("headroom says nothing right now for every payee", headroom({ rules, receipts: two, payees: [weather, gpu], now: NOW }).every((r) => r.withYou === 0n && r.stop === "payments per day"));
+console.log(`\n${pass} passed, ${fail} failed`);
+process.exit(fail ? 1 : 0);

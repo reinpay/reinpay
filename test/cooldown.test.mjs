@@ -1,0 +1,28 @@
+// v0.42: the payee cooldown, offline.
+import { parseUnits } from "viem";
+import { decide } from "../src/rules.js";
+import { explain } from "../src/explain.js";
+import { headroom } from "../src/headroom.js";
+let pass = 0, fail = 0;
+const check = (label, cond, info = "") => { cond ? pass++ : fail++; console.log(`${cond ? "PASS" : "FAIL"} ${label}${info ? ` (${info})` : ""}`); };
+const NOW = Date.parse("2026-11-20T12:00:00"), eth = (x) => parseUnits(String(x), 18);
+const G = "0x00000000000000000000000000000000DeaDBeef", W = "0x000000000000000000000000000000000000dEaD";
+const rules = { daily: { ETH: 0.005 }, maxPerPayment: { ETH: 0.002 }, approveAbove: { ETH: 0.001 }, repeatGuardMinutes: 10 };
+const gpu = { name: "GPU credits", address: G, cooldownMinutes: 60 }, weather = { name: "Weather API", address: W };
+const rc = (o) => ({ id: "RP-1", payeeAddress: G, token: "ETH", amountRaw: eth("0.0005").toString(), createdAt: NOW - 20 * 60_000, status: "ready", ...o });
+const D = (receipts, payee = gpu, amt = "0.0007") => decide({ rules, receipts, request: { payee, token: "ETH", amountRaw: eth(amt) }, now: NOW });
+check("no earlier payment: allowed", D([]).status === "allowed");
+const d1 = D([rc({})]);
+check("one waiting 20 min ago, cooldown 60: blocked, saying when the next one can be asked for", d1.status === "blocked" && d1.rule === "payee cooldown" && /20 min ago; its cooldown is 60 min/.test(d1.reason), d1.reason);
+check("a sent payment counts too", D([rc({ status: "sent" })]).rule === "payee cooldown");
+check("a rejected or blocked one does not", D([rc({ status: "rejected" }), rc({ id: "RP-2", status: "blocked" })]).status === "allowed");
+check("after the cooldown has passed: allowed", D([rc({ createdAt: NOW - 61 * 60_000 })]).status === "allowed");
+check("another payee is not affected", D([rc({})], weather).status === "allowed");
+check("no cooldown set: the payee can be paid again (the repeat guard still watches equal amounts)", D([rc({})], { ...gpu, cooldownMinutes: undefined }).status === "allowed");
+check("just now reads as just now", /asked for just now/.test(D([rc({ createdAt: NOW - 5000 })]).reason));
+const ex = explain({ rules, receipts: [rc({})], request: { payee: gpu, token: "ETH", amountRaw: eth("0.0007") }, now: NOW });
+check("check --explain marks the cooldown as the rule that decided", ex.steps.find((s) => s.decided)?.rule === "payee cooldown");
+const hr = headroom({ rules, receipts: [rc({})], payees: [gpu, weather], now: NOW });
+check("headroom says nothing right now for that payee, and not for the other", hr.find((r) => r.payee === "GPU credits").withYou === 0n && hr.find((r) => r.payee === "GPU credits").stop === "payee cooldown" && hr.find((r) => r.payee === "Weather API").withYou > 0n);
+console.log(`\n${pass} passed, ${fail} failed`);
+process.exit(fail ? 1 : 0);

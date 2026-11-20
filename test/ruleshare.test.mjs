@@ -1,0 +1,25 @@
+// v0.44: rules export and import, offline.
+import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
+import { exportRules, checkRulesFile, planRulesImport, SHARED } from "../src/ruleshare.js";
+let pass = 0, fail = 0;
+const check = (label, cond, info = "") => { cond ? pass++ : fail++; console.log(`${cond ? "PASS" : "FAIL"} ${label}${info ? ` (${info})` : ""}`); };
+const a = privateKeyToAccount(generatePrivateKey());
+const mine = { daily: { USDG: 10, ETH: 0.002 }, approveAbove: { USDG: 1 }, memoBlock: ["airdrop"], autoSend: true, grants: [{ token: "USDG", amount: "5", until: "2099-01-01T00:00:00Z" }], cosign: { by: a.address, above: { USDG: 5 } } };
+const f = await exportRules(mine, a);
+check("the file carries the shared rules and never grants, the co-signer or autosend", f.rules.daily.USDG === 10 && f.rules.memoBlock[0] === "airdrop" && !("autoSend" in f.rules) && !("grants" in f.rules) && !("cosign" in f.rules));
+check("a fresh file checks out, naming the signer", (await checkRulesFile(f)).ok && (await checkRulesFile(f)).signer === a.address);
+const t = structuredClone(f); t.rules.daily.USDG = 1000;
+check("a number changed after signing is refused", !(await checkRulesFile(t)).ok && /changed after/.test((await checkRulesFile(t)).reason));
+const sneaky = structuredClone(f); sneaky.rules.autoSend = true;
+check("a file that tries to set autosend is refused before the signature is even looked at", /may not set: autoSend/.test((await checkRulesFile(sneaky)).reason));
+check("unsigned or not a rules file: refused", !(await checkRulesFile({ ...f, signature: undefined })).ok && /not a Reinpay rules file/.test((await checkRulesFile({ kind: "reinpay-payees" })).reason));
+const other = { daily: { USDG: 50, ETH: 0.005 }, maxPerHour: 30, autoSend: false, grants: [{ token: "ETH", amount: "1", until: "2099-01-01T00:00:00Z" }] };
+const p = planRulesImport(f, other);
+check("import takes the file's rules", p.rules.daily.USDG === 10 && p.rules.approveAbove.USDG === 1 && p.rules.memoBlock[0] === "airdrop");
+check("a shared setting the file does not have is turned off (the hourly cap)", !("maxPerHour" in p.rules) && p.changes.some((c) => c.path === "rules.maxPerHour" && c.after === undefined));
+check("this wallet's grants and autosend are kept", p.rules.autoSend === false && p.rules.grants[0].token === "ETH");
+check("the changes read now → then", p.changes.some((c) => c.path === "rules.daily.USDG" && c.before === 50 && c.after === 10));
+check("importing your own rules back changes nothing", planRulesImport(f, mine).changes.length === 0);
+check("every shared setting is one the rules engine knows", SHARED.length === 19);
+console.log(`\n${pass} passed, ${fail} failed`);
+process.exit(fail ? 1 : 0);

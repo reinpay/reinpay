@@ -25,7 +25,9 @@ export function flatten(body) {
   };
   const b = structuredClone(body || {});
   const payees = b.payees || []; delete b.payees;
+  const schedules = b.schedules || []; delete b.schedules;
   walk(b, "");
+  for (const x of schedules) { const { id, createdAt, start, ...rest } = x; walk(rest, `schedules.${id}`); }
   for (const p of payees) { const { name, ...rest } = p; delete rest.addedAt; delete rest.proof; walk(rest, `payees.${name}`); if (p.proof) out[`payees.${name}.proof`] = "(proved)"; }
   return out;
 }
@@ -78,12 +80,28 @@ export function historyLines(history, { last = 10 } = {}) {
     const groups = new Map(); // a payee added or removed whole reads as one line
     for (const c of e.changes) { const m = /^payees\.(.+?)\.(address|isContract|tokens|note|expiresAt|category|daily|maxPerPayment)/.exec(c.path); if (m) { const g = groups.get(m[1]) || []; g.push(c); groups.set(m[1], g); } }
     const whole = new Set();
+    const addrOf = (name, side) => (groups.get(name) || []).find((c) => c.path.endsWith(".address"))?.[side];
+    for (const [name, g] of groups) { // a payee whose address moved to a new name is a rename
+      if (whole.has(name) || !g.every((c) => c.after === undefined)) continue;
+      const a = addrOf(name, "before"), to = [...groups.keys()].find((n) => n !== name && !whole.has(n) && addrOf(n, "after") === a && groups.get(n).every((c) => c.before === undefined));
+      if (to) { whole.add(name); whole.add(to); L.push(`  payee renamed  ${name} → ${to}  ${a}`); }
+    }
     for (const [name, g] of groups) {
+      if (whole.has(name)) continue;
       const addr = g.find((c) => c.path.endsWith(".address"));
       if (addr && g.every((c) => c.before === undefined)) { whole.add(name); L.push(`  payee added    ${name}  ${addr.after}`); }
       else if (addr && g.every((c) => c.after === undefined)) { whole.add(name); L.push(`  payee removed  ${name}  ${addr.before}`); }
     }
+    const sch = new Map(); // a schedule added or removed whole reads as one line too
+    for (const c of e.changes) { const m = /^schedules\.(SC-[0-9A-F]+)\.(.+)$/.exec(c.path); if (m) { const g = sch.get(m[1]) || {}; g[m[2]] = c; sch.set(m[1], g); } }
+    const wholeS = new Set();
+    for (const [id, g] of sch) {
+      const cs = Object.values(g), v = (k, side) => g[k]?.[side];
+      if (cs.every((c) => c.before === undefined)) { wholeS.add(id); L.push(`  schedule added    ${id}  ${v("amount", "after")} ${v("token", "after")} to ${v("payee", "after")}, ${v("every", "after")}`); }
+      else if (cs.every((c) => c.after === undefined)) { wholeS.add(id); L.push(`  schedule removed  ${id}  ${v("amount", "before")} ${v("token", "before")} to ${v("payee", "before")}`); }
+    }
     for (const c of e.changes) {
+      const ms = /^schedules\.(SC-[0-9A-F]+)\./.exec(c.path); if (ms && wholeS.has(ms[1])) continue;
       const m = /^payees\.(.+?)\./.exec(c.path); if (m && whole.has(m[1])) continue;
       L.push(c.path === "(first entry)" ? "  first entry: the rules as they were sealed" : `  ${c.path}  ${fmt(c.before)} → ${fmt(c.after)}`);
     }

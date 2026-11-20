@@ -1,0 +1,26 @@
+// v0.43: blocked words in memos, offline.
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { parseUnits } from "viem";
+process.env.REINPAY_HOME = mkdtempSync(join(tmpdir(), "reinpay-memoblock-"));
+const { decide, memoBlocked } = await import("../src/rules.js"), { explain } = await import("../src/explain.js"), C = await import("../src/config.js"), P = await import("../src/pay.js");
+let pass = 0, fail = 0;
+const check = (label, cond, info = "") => { cond ? pass++ : fail++; console.log(`${cond ? "PASS" : "FAIL"} ${label}${info ? ` (${info})` : ""}`); };
+const words = ["airdrop", "claim", "seed phrase", "verify wallet"];
+check("found whatever the case", memoBlocked(words, "Claim your AIRDROP reward") === "airdrop" || memoBlocked(words, "Claim your AIRDROP reward") === "claim");
+check("whole words only: 'claims' and 'reclaimed' are not 'claim'", memoBlocked(["claim"], "insurance claims, reclaimed tax") === null);
+check("a phrase matches across punctuation and extra spaces", memoBlocked(words, "please: SEED   phrase-check") === "seed phrase");
+check("nothing blocked, nothing found", memoBlocked([], "airdrop") === null && memoBlocked(undefined, "airdrop") === null && memoBlocked(words, "") === null);
+const NOW = Date.parse("2026-11-20T12:00:00"), payee = { name: "Weather API", address: "0x000000000000000000000000000000000000dEaD" };
+const rules = { daily: { ETH: 0.005 }, maxPerPayment: { ETH: 0.002 }, approveAbove: { ETH: 0.001 }, memoBlock: words };
+const req = (memo) => ({ payee, token: "ETH", amountRaw: parseUnits("0.0005", 18), memo });
+const d = decide({ rules, receipts: [], request: req("verify wallet to unlock"), now: NOW });
+check("decide blocks it as memo words, and the reason names the word and says why", d.status === "blocked" && d.rule === "memo words" && /"verify wallet"/.test(d.reason) && /prompt injection/.test(d.reason), d.reason);
+check("an ordinary memo goes through", decide({ rules, receipts: [], request: req("forecast bundle"), now: NOW }).status === "allowed");
+check("check --explain marks memo words as the deciding rule", explain({ rules, receipts: [], request: req("free airdrop"), now: NOW }).steps.find((s) => s.decided)?.rule === "memo words");
+C.saveConfig({ ...C.DEFAULT_CONFIG, rules: { ...C.DEFAULT_CONFIG.rules, memoBlock: words } });
+const v = JSON.stringify(P.rulesView());
+check("get_rules tells the agent there are blocked words but not which ones", v.includes("memoBlockedWords") && !v.includes("airdrop") && !v.includes("seed phrase"));
+console.log(`\n${pass} passed, ${fail} failed`);
+process.exit(fail ? 1 : 0);

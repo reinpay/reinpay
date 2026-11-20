@@ -96,12 +96,21 @@ export function decide({ rules, receipts, request, now = Date.now(), excludeId =
   const memoMin = Number(rules.memoMin || 0);
   if (memoMin > 0 && String(request.memo ?? "").trim().length < memoMin) return { status: "blocked", rule: "memo", reason: `Say what the payment is for: the memo needs at least ${memoMin} characters.` };
 
+  const hit = memoBlocked(rules.memoBlock, request.memo);
+  if (hit) return { status: "blocked", rule: "memo words", reason: `The memo contains "${hit}", a word you block. Requests like this are a common sign of a prompt injection; ask the user what they meant.` };
+
   const daily = dailyLimit(rules, symbol, now);
   if (daily === null || daily === 0n) return { status: "blocked", rule: "daily budget", reason: `There is no daily budget for ${symbol}, so the agent may not spend it.` };
   const cap = limit(rules, "maxPerPayment", symbol);
   if (cap !== null && amountRaw > cap) return { status: "blocked", rule: "max per payment", reason: `${fmt(amountRaw, symbol)} is above the max of ${fmt(cap, symbol)} per payment.` };
   const pcap = payee.maxPerPayment?.[symbol] != null ? parseUnits(String(payee.maxPerPayment[symbol]), TOKENS[symbol].decimals) : null;
   if (pcap !== null && amountRaw > pcap) return { status: "blocked", rule: "payee max", reason: `${fmt(amountRaw, symbol)} is above ${payee.name}'s max of ${fmt(pcap, symbol)} per payment.` };
+  const share = Number(rules.balanceShare || 0);
+  if (share > 0) {
+    if (request.balanceRaw == null) return { status: "blocked", rule: "balance share", reason: `Your balance-share rule needs the wallet's ${symbol} balance, and it could not be read (${request.balanceReason || "unknown"}). Nothing is paid until it can be.` };
+    const capB = (BigInt(request.balanceRaw) * BigInt(Math.round(share * 100))) / 10000n;
+    if (amountRaw > capB) return { status: "blocked", rule: "balance share", reason: `${fmt(amountRaw, symbol)} is more than ${share}% of the wallet's ${fmt(BigInt(request.balanceRaw), symbol)} balance (${fmt(capB, symbol)}).` };
+  }
   const { spent, held } = totals(list, symbol, now);
   if (spent + held + amountRaw > daily) {
     const left = daily > spent + held ? daily - spent - held : 0n;
@@ -125,11 +134,22 @@ export function decide({ rules, receipts, request, now = Date.now(), excludeId =
     }
   }
 
+  const cool = Number(payee.cooldownMinutes || 0);
+  if (cool > 0) {
+    const last = list.filter((r) => r.payeeAddress === payee.address && (DONE_SPENT.includes(r.status) || OPEN.includes(r.status))).reduce((m, r) => Math.max(m, r.createdAt), 0);
+    if (last && now - last < cool * 60_000) return { status: "blocked", rule: "payee cooldown", reason: `${payee.name} was paid or asked for ${now - last < 60_000 ? "just now" : `${Math.floor((now - last) / 60_000)} min ago`}; its cooldown is ${cool} min, so the next one can be asked for at ${new Date(last + cool * 60_000).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })}.` };
+  }
+
   const perHour = Number(rules.maxPerHour || 0);
   if (perHour > 0) {
     const since = now - 3_600_000;
     const n = list.filter((r) => r.createdAt >= since && (DONE_SPENT.includes(r.status) || OPEN.includes(r.status))).length;
     if (n >= perHour) return { status: "blocked", rule: "payments per hour", reason: `${n} payments were sent or are waiting in the last hour; your limit is ${perHour} per hour.` };
+  }
+  const perDay = Number(rules.maxPerDay || 0);
+  if (perDay > 0) {
+    const day = localDay(now), n = list.filter((r) => localDay(r.createdAt) === day && (DONE_SPENT.includes(r.status) || OPEN.includes(r.status))).length;
+    if (n >= perDay) return { status: "blocked", rule: "payments per day", reason: `${n} payments were sent or are waiting today; your limit is ${perDay} a day. It resets at midnight, local time.` };
   }
   const cat = payee.category;
   const env = cat ? rules.categories?.[cat]?.daily?.[symbol] : undefined;
@@ -185,10 +205,20 @@ export function decide({ rules, receipts, request, now = Date.now(), excludeId =
   if (rules.requireProven && !payee.proof && payee.isContract !== true) {
     return { status: "needs_approval", rule: "unproven payee", reason: `${payee.name} has not proved it controls ${payee.address}. You asked to approve payments to unproven payees yourself (reinpay payee challenge "${payee.name}").` };
   }
+  const pline = payee.approveAbove?.[symbol] != null ? parseUnits(String(payee.approveAbove[symbol]), TOKENS[symbol].decimals) : null;
+  if (pline !== null && amountRaw > pline) return { status: "needs_approval", rule: "payee approval line", reason: `${fmt(amountRaw, symbol)} is above the approval line you set for ${payee.name} (${fmt(pline, symbol)}).` };
   if (needsCosign(rules, symbol, amountRaw)) return { status: "needs_approval", rule: "co-sign", reason: `${fmt(amountRaw, symbol)} is above your co-sign line of ${rules.cosign.above[symbol]} ${symbol}: it needs your approval and a signature from ${rules.cosign.by}.` };
   const line = limit(rules, "approveAbove", symbol);
   if (line !== null && amountRaw > line) return { status: "needs_approval", rule: "approval line", reason: `${fmt(amountRaw, symbol)} is above your approval line of ${fmt(line, symbol)}.` };
   return { status: "allowed", rule: "within rules", reason: "Inside every rule." };
+}
+
+/** The first blocked word or phrase found in a memo (case-insensitive, whole words), or null. */
+export function memoBlocked(words, memo) {
+  if (!Array.isArray(words) || !words.length) return null;
+  const m = " " + String(memo ?? "").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ") + " ";
+  for (const w of words) { const k = String(w).toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim(); if (k && m.includes(" " + k + " ")) return w; }
+  return null;
 }
 
 /** "30d", "12h", "90m" as milliseconds; "off" as null. Throws on anything else. */

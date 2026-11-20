@@ -1,0 +1,23 @@
+// v0.46: the balance-share rule, offline (the balance is passed in, as the callers read it from the chain).
+import { parseUnits } from "viem";
+import { decide } from "../src/rules.js";
+import { explain } from "../src/explain.js";
+import { headroom } from "../src/headroom.js";
+let pass = 0, fail = 0;
+const check = (label, cond, info = "") => { cond ? pass++ : fail++; console.log(`${cond ? "PASS" : "FAIL"} ${label}${info ? ` (${info})` : ""}`); };
+const NOW = Date.parse("2026-11-20T12:00:00"), eth = (x) => parseUnits(String(x), 18);
+const payee = { name: "GPU credits", address: "0x00000000000000000000000000000000DeaDBeef" };
+const rules = { daily: { ETH: 0.005, USDG: 25 }, maxPerPayment: { ETH: 0.002, USDG: 10 }, approveAbove: { ETH: 0.001, USDG: 5 }, balanceShare: 0.1 };
+const D = (amt, bal, extra = {}) => decide({ rules, receipts: [], request: { payee, token: "ETH", amountRaw: eth(amt), ...(bal === undefined ? {} : { balanceRaw: eth(bal) }), ...extra }, now: NOW });
+check("0.0008 of a 1 ETH balance at 0.1%: allowed", D("0.0008", "1").status === "allowed");
+const d = D("0.0015", "1");
+check("0.0015 of 1 ETH at 0.1%: blocked, with the share, the balance and the cap", d.status === "blocked" && d.rule === "balance share" && /more than 0\.1% of the wallet's 1 ETH balance \(0\.001 ETH\)/.test(d.reason), d.reason);
+check("exactly the cap is allowed", D("0.001", "1").status === "allowed");
+check("fail closed: no balance read, nothing paid", D("0.0001", undefined, { balanceReason: "timeout" }).rule === "balance share" && /could not be read \(timeout\)/.test(D("0.0001", undefined, { balanceReason: "timeout" }).reason));
+check("an empty wallet: everything blocked by it", D("0.0001", "0").rule === "balance share");
+check("off: no balance needed, the usual rules decide", decide({ rules: { ...rules, balanceShare: undefined }, receipts: [], request: { payee, token: "ETH", amountRaw: eth("0.0015") }, now: NOW }).rule === "approval line");
+check("check --explain shows the share and marks it", explain({ rules, receipts: [], request: { payee, token: "ETH", amountRaw: eth("0.0015"), balanceRaw: eth("1") }, now: NOW }).steps.find((s) => s.decided)?.rule === "balance share");
+const hr = headroom({ rules, receipts: [], payees: [payee], now: NOW, usdFor: (t) => ({ balanceRaw: t === "ETH" ? eth("1") : 0n }) });
+check("headroom: up to 0.001 ETH, and nothing in USDG with a 0 USDG balance", hr.find((r) => r.token === "ETH").withYou === eth("0.001") && hr.find((r) => r.token === "USDG").withYou === 0n && hr.find((r) => r.token === "USDG").stop === "balance share");
+console.log(`\n${pass} passed, ${fail} failed`);
+process.exit(fail ? 1 : 0);

@@ -13,6 +13,7 @@ import { withLock } from "./lock.js";
 import { notifyOwner } from "./notify.js";
 import { checkSeal } from "./seal.js";
 import { usdValue } from "./price.js";
+import { plainRules } from "./plain.js";
 import { search } from "./search.js";
 import { needsCosign, checkCosign } from "./cosign.js";
 import { findLookalike, LookalikeError } from "./lookalike.js";
@@ -117,6 +118,12 @@ async function sendNow(r, tx, account) {
 
 /** The agent's way to pay. Never signs unless the payment is inside every rule AND the owner turned on autoSend AND unlocked. */
 const usdRules = (rules) => !!rules?.usd && (rules.usd.max != null || rules.usd.daily != null);
+/** The wallet balance for the balance-share rule, read only when that rule is on. Fail closed: a read error is passed on. */
+async function balFor(cfg, wallet, symbol) {
+  if (!cfg.rules?.balanceShare) return {};
+  try { const b = await balances(wallet); return { balanceRaw: b[symbol] ?? 0n }; } catch (e) { return { balanceReason: e?.shortMessage || e?.message || "unreachable" }; }
+}
+
 async function usdFor(cfg, symbol, amountRaw) {
   if (!usdRules(cfg.rules)) return {};
   const u = await usdValue(symbol, amountRaw).catch((e) => ({ value: null, reason: e.message }));
@@ -141,7 +148,7 @@ export async function requestPayment({ payee, amount, token = "USDG", memo = "" 
   if (usd.usdRaw) { base.usdRaw = usd.usdRaw; base.usdValue = fmt(BigInt(usd.usdRaw), "USDG").split(" ")[0]; if (usd.ethPrice) base.ethPriceUsdg = usd.ethPrice.toFixed(2); }
   const r = tokenPayee ? addReceipt({ ...base, status: "blocked", rule: "token contract", reason: `${p.name} (${p.address}) is the contract of ${tokenPayee}. Tokens sent to a token contract are usually stuck for good. Ask the owner to fix this payee.` }) : await withLock(async () => {
     expireStale(cfg.rules);
-    const d = decide({ rules: cfg.rules, receipts: allReceipts(), request: { payee: p, token: symbol, amountRaw, memo, usdRaw: usd.usdRaw, usdReason: usd.usdReason, session } });
+    const d = decide({ rules: cfg.rules, receipts: allReceipts(), request: { payee: p, token: symbol, amountRaw, memo, usdRaw: usd.usdRaw, usdReason: usd.usdReason, ...(await balFor(cfg, from, symbol)), session } });
     if (d.status === "blocked") return addReceipt({ ...base, status: "blocked", rule: d.rule, reason: d.reason });
     const ch = await check(from, symbol, p.address, amountRaw, cfg.rules);
     if (ch.problem) return addReceipt({ ...base, status: "blocked", rule: ch.rule || "simulation", reason: `Simulated on mainnet: ${ch.problem}.`, simulation: simView(ch.sim) });
@@ -213,7 +220,7 @@ export async function previewPayment({ payee, amount, token = "USDG", memo, expl
   if (fz) return out("blocked", "frozen", `Reinpay is frozen (${fz.reason}).`);
   if (p && p.isContract !== false) { const tok = await tokenAt(p.address); if (tok) return out("blocked", "token contract", `${p.name} is the contract of ${tok}.`); }
   const usd = await usdFor(cfg, symbol, amountRaw);
-  const dArgs = { rules: memo === undefined ? { ...cfg.rules, memoMin: 0 } : cfg.rules, receipts: allReceipts(), request: { payee: p, token: symbol, amountRaw, memo, usdRaw: usd.usdRaw, usdReason: usd.usdReason } };
+  const dArgs = { rules: memo === undefined ? { ...cfg.rules, memoMin: 0 } : cfg.rules, receipts: allReceipts(), request: { payee: p, token: symbol, amountRaw, memo, usdRaw: usd.usdRaw, usdReason: usd.usdReason, ...(await balFor(cfg, from, symbol)) } };
   const d = decide(dArgs);
   if (wantSteps) steps = (await import("./explain.js")).explain(dArgs).steps;
   if (d.status === "blocked") return out("blocked", d.rule, d.reason);
@@ -251,7 +258,7 @@ export async function previewPlan(items, { _check = check } = {}) { // _check: t
     if (fz) { row("blocked", "frozen", `Reinpay is frozen (${fz.reason}).`); continue; }
     if (p && p.isContract !== false) { const tok = await tokenAt(p.address); if (tok) { row("blocked", "token contract", `${p.name} is the contract of ${tok}.`); continue; } }
     const usd = await usdFor(cfg, symbol, amountRaw);
-    const d = decide({ rules: memo === undefined ? { ...cfg.rules, memoMin: 0 } : cfg.rules, receipts: [...real, ...planned], request: { payee: p, token: symbol, amountRaw, memo, usdRaw: usd.usdRaw, usdReason: usd.usdReason }, now });
+    const d = decide({ rules: memo === undefined ? { ...cfg.rules, memoMin: 0 } : cfg.rules, receipts: [...real, ...planned], request: { payee: p, token: symbol, amountRaw, memo, usdRaw: usd.usdRaw, usdReason: usd.usdReason, ...(await balFor(cfg, from, symbol)) }, now });
     if (d.status === "blocked") { row("blocked", d.rule, d.reason); continue; }
     const ch = await _check(from, symbol, p.address, amountRaw, cfg.rules);
     if (ch.problem) { row("blocked", ch.rule || "simulation", `Simulated on mainnet: ${ch.problem}.`, { simulation: simView(ch.sim) }); continue; }
@@ -303,7 +310,7 @@ export async function approve(id, { passphrase, cosig } = {}) {
     const p = findPayee(cfg.payees, r.payeeAddress);
     if (!p || getAddress(p.address) !== getAddress(r.payeeAddress || "0x0000000000000000000000000000000000000000")) return { final: updateReceipt(r.id, { status: "blocked", rule: "payee list", reason: "This payee is no longer on your payee list." }, "Approval refused: payee not on the list.") };
     const usd = await usdFor(cfg, r.token, BigInt(r.amountRaw));
-    const d = decide({ rules: { ...cfg.rules, repeatGuardMinutes: 0, approveAbove: {}, memoMin: 0 }, receipts: allReceipts(), request: { payee: p, token: r.token, amountRaw: BigInt(r.amountRaw), usdRaw: usd.usdRaw, usdReason: usd.usdReason }, excludeId: r.id });
+    const d = decide({ rules: { ...cfg.rules, repeatGuardMinutes: 0, approveAbove: {}, memoMin: 0 }, receipts: allReceipts(), request: { payee: p, token: r.token, amountRaw: BigInt(r.amountRaw), usdRaw: usd.usdRaw, usdReason: usd.usdReason, ...(await balFor(cfg, r.wallet, r.token)) }, excludeId: r.id });
     if (d.status === "blocked") return { final: updateReceipt(r.id, { status: "blocked", rule: d.rule, reason: d.reason }, `Approval refused: ${d.reason}`) };
     // Build the transaction fresh from the payee list and the amount, simulate exactly that, and sign exactly that.
     const ch = await check(r.wallet, r.token, getAddress(p.address), BigInt(r.amountRaw), cfg.rules);
@@ -337,7 +344,7 @@ export async function approvePreview(id, now = Date.now(), { _check = check } = 
   const p = findPayee(cfg.payees, r.payeeAddress);
   if (!add("payee list", !!p && getAddress(p.address) === getAddress(r.payeeAddress || "0x0000000000000000000000000000000000000000"), p ? `${p.name} is still on your list` : "this payee is no longer on your list")) return out(false);
   const usd = await usdFor(cfg, r.token, BigInt(r.amountRaw));
-  const d = decide({ rules: { ...cfg.rules, repeatGuardMinutes: 0, approveAbove: {}, memoMin: 0 }, receipts: allReceipts(), request: { payee: p, token: r.token, amountRaw: BigInt(r.amountRaw), usdRaw: usd.usdRaw, usdReason: usd.usdReason }, excludeId: r.id, now });
+  const d = decide({ rules: { ...cfg.rules, repeatGuardMinutes: 0, approveAbove: {}, memoMin: 0 }, receipts: allReceipts(), request: { payee: p, token: r.token, amountRaw: BigInt(r.amountRaw), usdRaw: usd.usdRaw, usdReason: usd.usdReason, ...(await balFor(cfg, r.wallet, r.token)) }, excludeId: r.id, now });
   if (!add("rules now", d.status !== "blocked", d.status === "blocked" ? `${d.rule}: ${d.reason}` : "inside every rule now (the approval line and repeat guard are what you are answering)")) return out(false);
   const ch = await _check(r.wallet, r.token, getAddress(p.address), BigInt(r.amountRaw), cfg.rules);
   if (!add("simulation now", !ch.problem, ch.problem ? ch.problem : `one transfer out, at block ${ch.sim.block}${ch.feeWei != null ? `, fee about ${formatEther(ch.feeWei)} ETH` : ""}`)) return out(false);
@@ -381,13 +388,18 @@ export function rulesView(now = Date.now()) {
       ownerApprovesAbove: cfg.rules.approveAbove?.[s] != null ? fmt(limit(cfg.rules, "approveAbove", s), s) : null,
     };
   }
+  const plain = plainRules(cfg, { frozen: frozen() });
   return {
+    inPlainWords: plain,
     frozen: frozen(), circuitBreaker: breakerOf(cfg.rules) ? `freezes after ${breakerOf(cfg.rules).count} blocked requests in ${breakerOf(cfg.rules).minutes} minutes` : "off",
     firstPaymentNeedsOwner: cfg.rules.firstPayment === "ask",
     ...(cfg.rules.maxFeeEth ? { maxNetworkFee: `${cfg.rules.maxFeeEth} ETH` } : {}),
     ...(cfg.rules.cosign?.by ? { coSign: { by: cfg.rules.cosign.by, above: cfg.rules.cosign.above } } : {}),
     ...(cfg.rules.requireProven ? { unprovenPayeesNeedOwner: true } : {}),
     ...(usdRules(cfg.rules) ? { usdRules: { ...(cfg.rules.usd.max != null ? { maxPerPayment: `${cfg.rules.usd.max} USD` } : {}), ...(cfg.rules.usd.daily != null ? { dailyAcrossTokens: `${cfg.rules.usd.daily} USD` } : {}), priceSource: "two WETH/USDG pools on Robinhood Chain; payments in other tokens are blocked while USD rules are on" } } : {}),
+    ...(cfg.rules.balanceShare ? { maxShareOfBalancePerPayment: `${cfg.rules.balanceShare}% of the wallet's balance of that token, read from the chain` } : {}),
+    ...(cfg.rules.maxPerDay ? { maxPaymentsPerDay: Number(cfg.rules.maxPerDay) } : {}),
+    ...(cfg.rules.memoBlock?.length ? { memoBlockedWords: `${cfg.rules.memoBlock.length} words or phrases the owner blocks in memos (not listed here); a memo containing one is refused` } : {}),
     ...(cfg.rules.memoMin ? { memoRequired: `at least ${cfg.rules.memoMin} characters saying what the payment is for` } : {}),
     ...(cfg.rules.expireAfterMinutes ? { waitingPaymentsExpireAfterMinutes: Number(cfg.rules.expireAfterMinutes) } : {}),
     ...(cfg.schedules?.length ? { scheduledPayments: cfg.schedules.map((x) => ({ id: x.id, payee: x.payee, amount: `${x.amount} ${x.token}`, every: x.every, starts: x.start, ...(x.paused ? { paused: true } : {}) })) } : {}),
@@ -420,6 +432,15 @@ export async function walletStatus() {
   return { address: a, chainId: CHAIN_ID, explorer: addrLink(a), balances: Object.fromEntries(Object.entries(b).map(([s, v]) => [s, fmt(v, s).split(" ")[0]])), ...rulesView() };
 }
 
+/** reinpay why <RP-id>: replay one past decision with the rules sealed at the time. Local only. */
+export async function whyView(id) {
+  const r = getReceipt(id);
+  if (!r) throw new Error(`No receipt ${id}.`);
+  const H = await import("./history.js"), { sealBody } = await import("./seal.js"), { why } = await import("./why.js");
+  const cfg = loadConfig(); syncTokens(cfg);
+  return why({ receipt: r, receipts: allReceipts(), history: H.loadHistory() || [], current: sealBody(cfg) });
+}
+
 /** reinpay headroom: what the agent could still pay each payee right now, without you and with your yes. Local only. */
 export async function headroomView(now = Date.now()) {
   const cfg = loadConfig();
@@ -428,7 +449,10 @@ export async function headroomView(now = Date.now()) {
   const { headroom, headroomLines } = await import("./headroom.js");
   let price = null; // USD rules need one ETH price for the whole search; read it once
   if (usdRules(cfg.rules)) { try { price = (await usdValue("ETH", 10n ** 18n)).value; } catch { price = null; } }
-  const usdFor = usdRules(cfg.rules) ? (t, a) => (t === "USDG" ? { usdRaw: a.toString() } : price != null ? { usdRaw: ((a * BigInt(price)) / 10n ** 18n).toString() } : { usdReason: "no ETH price" }) : null;
+  let bal = {}; // the balance-share rule needs the balances; read them once
+  if (cfg.rules.balanceShare) { try { const b = await balances(requireWallet()); bal = Object.fromEntries(Object.entries(b).map(([t, v]) => [t, { balanceRaw: v }])); } catch (e) { bal = { _err: e?.shortMessage || e?.message }; } }
+  const usdOne = usdRules(cfg.rules) ? (t, a) => (t === "USDG" ? { usdRaw: a.toString() } : price != null ? { usdRaw: ((a * BigInt(price)) / 10n ** 18n).toString() } : { usdReason: "no ETH price" }) : () => ({});
+  const usdFor = (t, a) => ({ ...usdOne(t, a), ...(cfg.rules.balanceShare ? bal[t] || { balanceReason: bal._err || "no balance" } : {}) });
   const rows = headroom({ rules: cfg.rules, receipts: allReceipts(), payees: cfg.payees, now, usdFor });
   return { rows: rows.map((r) => ({ ...r, free: fmt(r.free, r.token), withYou: fmt(r.withYou, r.token) })), lines: headroomLines(rows) };
 }
@@ -483,10 +507,10 @@ export function setPayee(name, patch) {
 
 /** Owner only: set or clear a payee's own daily budget or max per payment for one token. amount "off" clears it. */
 export function setPayeeLimit(name, kind, token, amount) {
-  const key = { daily: "daily", max: "maxPerPayment" }[kind];
+  const key = { daily: "daily", max: "maxPerPayment", "ask-above": "approveAbove" }[kind];
   const sym = String(token || "").toUpperCase();
   syncTokens();
-  if (!key || !TOKENS[sym]) throw new Error(`Usage: reinpay payee limit <name> <daily|max> <${Object.keys(TOKENS).join("|")}> <amount|off>`);
+  if (!key || !TOKENS[sym]) throw new Error(`Usage: reinpay payee limit <name> <daily|max|ask-above> <${Object.keys(TOKENS).join("|")}> <amount|off>`);
   const cfg = loadConfig();
   const p = findPayee(cfg.payees, name);
   if (!p) throw new Error(`No payee "${name}".`);
@@ -565,6 +589,29 @@ export function removeToken(symbol) {
   saveConfig(cfg);
   syncTokens(cfg);
   return s;
+}
+
+/** Pure: rename a payee in a config, and the schedules that pay it. Receipts keep the name they were made with. */
+export function renameInConfig(cfg, from, to) {
+  const p = findPayee(cfg.payees, from);
+  if (!p) throw new Error(`No payee "${from}".`);
+  if (!/^[\w .'-]{2,40}$/.test(String(to || ""))) throw new Error("Payee name: 2-40 letters, digits, spaces, dots, dashes or apostrophes.");
+  const taken = findPayee(cfg.payees, to);
+  if (taken && taken !== p) throw new Error(`"${to}" is already a payee (${taken.address}).`);
+  if (p.name === to) throw new Error(`"${from}" is already called that.`);
+  const old = p.name; let schedules = 0;
+  const out = { ...cfg, payees: cfg.payees.map((x) => (x === p ? { ...x, name: to } : x)), schedules: (cfg.schedules || []).map((s) => (s.payee === old || (findPayee([p], s.payee) === p) ? (schedules++, { ...s, payee: to }) : s)) };
+  if (!cfg.schedules) delete out.schedules;
+  return { cfg: out, from: old, to, address: p.address, schedules };
+}
+export function renamePayee(from, to) { const r = renameInConfig(loadConfig(), from, to); saveConfig(r.cfg); return r; }
+
+export function setPayeeCooldown(name, minutes) {
+  const cfg = loadConfig(), p = findPayee(cfg.payees, name);
+  if (!p) throw new Error(`No payee "${name}".`);
+  if (String(minutes) === "off" || String(minutes) === "0") delete p.cooldownMinutes;
+  else { const n = Number(minutes); if (!(Number.isInteger(n) && n >= 1 && n <= 10080)) throw new Error("Usage: reinpay payee cooldown <name> <1-10080 minutes|off>"); p.cooldownMinutes = n; }
+  saveConfig(cfg); return p;
 }
 
 export function removePayee(name) {

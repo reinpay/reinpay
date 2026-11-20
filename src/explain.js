@@ -3,7 +3,7 @@
 // and the steps after it are marked "not reached", because decide() stops at the first rule that blocks or holds.
 import { parseUnits, formatUnits } from "viem";
 import { TOKENS } from "./chain.js";
-import { decide, limit, dailyLimit, totals, fmt, localDay, insideHours, DONE_SPENT, OPEN } from "./rules.js";
+import { decide, limit, dailyLimit, totals, fmt, localDay, insideHours, memoBlocked, DONE_SPENT, OPEN } from "./rules.js";
 import { needsCosign } from "./cosign.js";
 
 const step = (rule, state, detail) => ({ rule, state, detail }); // state: pass | block | hold | off
@@ -31,12 +31,18 @@ export function explain({ rules, receipts, request, now = Date.now(), excludeId 
     const memoMin = Number(rules.memoMin || 0);
     if (memoMin > 0) { const n = String(request.memo ?? "").trim().length; S.push(step("memo", n < memoMin ? "block" : "pass", `${n} of ${memoMin} characters`)); }
     else S.push(step("memo", "off", "no memo rule"));
+    if (Array.isArray(rules.memoBlock) && rules.memoBlock.length) { const hit = memoBlocked(rules.memoBlock, request.memo); S.push(step("memo words", hit ? "block" : "pass", hit ? `contains "${hit}"` : `none of ${rules.memoBlock.length} blocked words`)); }
+    else S.push(step("memo words", "off", "no blocked words"));
     const daily = dailyLimit(rules, symbol, now);
     if (daily === null || daily === 0n) S.push(step("daily budget", "block", `no daily budget for ${symbol}`));
     const cap = limit(rules, "maxPerPayment", symbol);
     S.push(cap === null ? step("max per payment", "off", "no max") : step("max per payment", amountRaw > cap ? "block" : "pass", `max ${fmt(cap, symbol)}`));
     const pcap = payee.maxPerPayment?.[symbol] != null ? parseUnits(String(payee.maxPerPayment[symbol]), tok.decimals) : null;
     S.push(pcap === null ? step("payee max", "off", `no max for ${payee.name}`) : step("payee max", amountRaw > pcap ? "block" : "pass", `${payee.name} max ${fmt(pcap, symbol)}`));
+    const share = Number(rules.balanceShare || 0);
+    if (share > 0) { if (request.balanceRaw == null) S.push(step("balance share", "block", "the balance could not be read"));
+      else { const capB = (BigInt(request.balanceRaw) * BigInt(Math.round(share * 100))) / 10000n; S.push(step("balance share", amountRaw > capB ? "block" : "pass", `${share}% of ${fmt(BigInt(request.balanceRaw), symbol)} is ${fmt(capB, symbol)}`)); } }
+    else S.push(step("balance share", "off", "no balance share"));
     if (daily) {
       const { spent, held } = totals(list, symbol, now);
       const left = daily > spent + held ? daily - spent - held : 0n;
@@ -52,10 +58,18 @@ export function explain({ rules, receipts, request, now = Date.now(), excludeId 
     if (pdaily === null) S.push(step("payee daily budget", "off", `no daily budget for ${payee.name}`));
     else { const t = totals(list, symbol, now, payee.address); const left = pdaily > t.spent + t.held ? pdaily - t.spent - t.held : 0n;
       S.push(step("payee daily budget", t.spent + t.held + amountRaw > pdaily ? "block" : "pass", `${fmt(left, symbol)} left of ${payee.name}'s ${fmt(pdaily, symbol)}`)); }
+    const cool = Number(payee.cooldownMinutes || 0);
+    if (cool > 0) { const last = list.filter((r) => r.payeeAddress === payee.address && (DONE_SPENT.includes(r.status) || OPEN.includes(r.status))).reduce((m, r) => Math.max(m, r.createdAt), 0);
+      S.push(step("payee cooldown", last && now - last < cool * 60_000 ? "block" : "pass", last ? `last one ${Math.floor((now - last) / 60_000)} min ago, cooldown ${cool} min` : `cooldown ${cool} min, none yet`)); }
+    else S.push(step("payee cooldown", "off", `no cooldown for ${payee.name}`));
     const perHour = Number(rules.maxPerHour || 0);
     if (perHour > 0) { const n = list.filter((r) => r.createdAt >= now - 3_600_000 && (DONE_SPENT.includes(r.status) || OPEN.includes(r.status))).length;
       S.push(step("payments per hour", n >= perHour ? "block" : "pass", `${n} of ${perHour} in the last hour`)); }
     else S.push(step("payments per hour", "off", "no hourly cap"));
+    const perDay = Number(rules.maxPerDay || 0);
+    if (perDay > 0) { const day = localDay(now), n = list.filter((r) => localDay(r.createdAt) === day && (DONE_SPENT.includes(r.status) || OPEN.includes(r.status))).length;
+      S.push(step("payments per day", n >= perDay ? "block" : "pass", `${n} of ${perDay} today`)); }
+    else S.push(step("payments per day", "off", "no daily count"));
     const cat = payee.category, env = cat ? rules.categories?.[cat]?.daily?.[symbol] : undefined;
     if (env != null && env !== "") {
       const c = parseUnits(String(env), tok.decimals), day = localDay(now); let used = 0n;
@@ -91,6 +105,8 @@ export function explain({ rules, receipts, request, now = Date.now(), excludeId 
     else S.push(step("quiet hours", "off", "any time"));
     if (rules.requireProven && payee.isContract !== true) S.push(step("unproven payee", payee.proof ? "pass" : "hold", payee.proof ? "payee proved its address" : "payee has not proved its address"));
     else S.push(step("unproven payee", "off", "not required"));
+    const pline = payee.approveAbove?.[symbol] != null ? parseUnits(String(payee.approveAbove[symbol]), tok.decimals) : null;
+    S.push(pline === null ? step("payee approval line", "off", `no own line for ${payee.name}`) : step("payee approval line", amountRaw > pline ? "hold" : "pass", `${payee.name} asks you above ${fmt(pline, symbol)}`));
     if (rules.cosign?.above?.[symbol] != null) S.push(step("co-sign", needsCosign(rules, symbol, amountRaw) ? "hold" : "pass", `second signature above ${rules.cosign.above[symbol]} ${symbol}`));
     else S.push(step("co-sign", "off", "off"));
     const line = limit(rules, "approveAbove", symbol);
