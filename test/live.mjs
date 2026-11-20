@@ -77,6 +77,8 @@ const r2 = await rq("Test payee", "0.0005");
 check("the same payment again is held by the repeat guard", r2.status === "needs_approval" && r2.rule === "repeat guard");
 const r3 = await rq("Test payee", "0.0015");
 check("0.0015 ETH is above the approval line (0.001) and waits", r3.status === "needs_approval" && r3.rule === "approval line");
+{ const apd = await P.approvePreview(r3.id), still = (await import("../src/receipts.js")).getReceipt(r3.id);
+  check("approve --dry: the rules and a fresh mainnet simulation pass, it stops before signing, the receipt is unchanged", apd.steps.some((x) => x.rule === "simulation now" && x.ok) && still.status === "needs_approval", apd.steps.find((x) => x.rule === "simulation now")?.detail); }
 const r4 = await rq("Test payee", "0.0025");
 check("0.0025 ETH is above the max per payment (0.002) and is blocked", r4.status === "blocked" && r4.rule === "max per payment");
 const r5 = await rq("Test payee", "0.0019");

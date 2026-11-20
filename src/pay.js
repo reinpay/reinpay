@@ -317,6 +317,35 @@ export async function approve(id, { passphrase, cosig } = {}) {
   return view(await sendNow(done.go, done.tx, account));
 }
 
+/**
+ * reinpay approve --dry: everything approve checks, in the same order, read fresh now, and then it stops before the key
+ * is opened. Nothing is recorded, nothing changes on the receipt, nothing is signed.
+ */
+export async function approvePreview(id, now = Date.now(), { _check = check } = {}) { // _check: tests only
+  const r = getReceipt(id);
+  if (!r) throw new Error(`No receipt ${id}.`);
+  const cfg = loadConfig();
+  syncTokens(cfg);
+  const steps = [], add = (rule, ok, detail) => { steps.push({ rule, ok, detail }); return ok; };
+  const out = (wouldSign) => ({ dryRun: true, id: r.id, payee: r.payee, amount: r.amount, token: r.token, wouldSign, steps, note: "Nothing was recorded, changed or signed." });
+  if (!add("waiting", ["needs_approval", "ready"].includes(r.status), r.status === "needs_approval" ? `waits for you (${r.rule})` : r.status === "ready" ? "ready, waits for you" : `${r.status}, not waiting`)) return out(false);
+  const m = Number(cfg.rules.expireAfterMinutes || 0);
+  if (m && !add("not expired", now - r.createdAt <= m * 60_000, `waiting ${Math.round((now - r.createdAt) / 60000)} of ${m} minutes`)) return out(false);
+  if (needsCosign(cfg.rules, r.token, r.amountRaw)) add("co-sign", true, `needs a signature from ${cfg.rules.cosign.by} too: approve with --cosig=0x…`);
+  const fz = frozen();
+  if (!add("not frozen", !fz, fz ? `frozen: ${fz.reason}` : "not frozen")) return out(false);
+  const p = findPayee(cfg.payees, r.payeeAddress);
+  if (!add("payee list", !!p && getAddress(p.address) === getAddress(r.payeeAddress || "0x0000000000000000000000000000000000000000"), p ? `${p.name} is still on your list` : "this payee is no longer on your list")) return out(false);
+  const usd = await usdFor(cfg, r.token, BigInt(r.amountRaw));
+  const d = decide({ rules: { ...cfg.rules, repeatGuardMinutes: 0, approveAbove: {}, memoMin: 0 }, receipts: allReceipts(), request: { payee: p, token: r.token, amountRaw: BigInt(r.amountRaw), usdRaw: usd.usdRaw, usdReason: usd.usdReason }, excludeId: r.id, now });
+  if (!add("rules now", d.status !== "blocked", d.status === "blocked" ? `${d.rule}: ${d.reason}` : "inside every rule now (the approval line and repeat guard are what you are answering)")) return out(false);
+  const ch = await _check(r.wallet, r.token, getAddress(p.address), BigInt(r.amountRaw), cfg.rules);
+  if (!add("simulation now", !ch.problem, ch.problem ? ch.problem : `one transfer out, at block ${ch.sim.block}${ch.feeWei != null ? `, fee about ${formatEther(ch.feeWei)} ETH` : ""}`)) return out(false);
+  const sc = await checkSeal(cfg, r.wallet);
+  if (!add("config seal", sc.ok, sc.reason)) return out(false);
+  return out(true);
+}
+
 export function reject(id, why = "Rejected by the owner.") {
   const r = getReceipt(id);
   if (!r) throw new Error(`No receipt ${id}.`);

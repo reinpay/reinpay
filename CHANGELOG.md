@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.37.0 (unreleased): approve, dry
+
+- `reinpay approve <RP-id> ... | --all --dry [--json]`: every check approve makes, fresh now, including a new mainnet simulation, then it stops before signing. Nothing recorded or changed, no passphrase.
+- Tests: 9 checks offline and 1 live check.
+
 ## 0.36.0 (unreleased): rules history
 
 - Every seal adds a signed, chained entry to `rules-history.json` with what changed. `reinpay rules history [--last=N] [--json]` lists them and checks the signatures, the chain and that the rules sealed now are the last entry. Notification secrets are stored only as a fingerprint.

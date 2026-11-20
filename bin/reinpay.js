@@ -64,6 +64,7 @@ const HELP = `reinpay ${pkg.version} - a wallet for AI agents that only spends i
   reinpay payee limit <name> <daily|max> <USDG|ETH> <amount|off>   A payee's own daily budget or max per payment
   reinpay pending                          Payments waiting for you
   reinpay approve <RP-id> [RP-id ...] | --all   Check the rules again, simulate again, then sign and send (one yes for all)
+  reinpay approve <RP-id> ... | --all --dry   Everything approve checks, fresh now, then stop before signing
   reinpay reject <RP-id>                   Refuse a waiting payment
   reinpay receipts [--status=sent] [--payee=] [--token=] [--since=2026-11-01] [--until=] [--min=] [--max=] [--memo=] [--rule=] [--json | --csv]
   reinpay verify <RP-id> | --all [--json]  Read sent payments back from the chain and check them against their receipts
@@ -448,6 +449,20 @@ async function main() {
     P.expireStale(C.loadConfig().rules);
     const list = [...P.listReceipts({ status: "needs_approval", limit: 200 }), ...P.listReceipts({ status: "ready", limit: 200 })];
     return console.log(list.length ? list.map(line).join("\n") : "Nothing is waiting for you.");
+  }
+  if (cmd === "approve" && flags.has("--dry")) { // read-only: no TTY needed, nothing is signed
+    const { listReceipts } = P;
+    const ids = flags.has("--all") ? [...listReceipts({ status: "needs_approval", limit: 200 }), ...listReceipts({ status: "ready", limit: 200 })].map((r) => r.id).reverse() : [...new Set(pos.map((x) => x.toUpperCase()))];
+    if (!ids.length) throw new Error(flags.has("--all") ? "Nothing is waiting for you." : "Usage: reinpay approve <RP-id> [RP-id ...] --dry");
+    const res = []; for (const id of ids) res.push(await P.approvePreview(id));
+    if (flags.has("--json")) return console.log(JSON.stringify(res, null, 2));
+    for (const v of res) {
+      console.log(`${v.id}  ${v.amount} ${v.token} to ${v.payee}: if you approved it now`);
+      const w = Math.max(...v.steps.map((x) => x.rule.length));
+      for (const x of v.steps) console.log(`  ${x.ok ? "✓" : "✗"} ${x.rule.padEnd(w)}  ${x.detail}`);
+      console.log(v.wouldSign ? "  → it would be signed and sent.\n" : "  → it would not be sent.\n");
+    }
+    return console.log("Dry run: nothing was recorded, changed or signed. Approve for real with reinpay approve <id>.");
   }
   if (cmd === "approve") {
     requireTTY("approve");
