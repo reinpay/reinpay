@@ -210,7 +210,7 @@ const { StdioClientTransport } = await import("@modelcontextprotocol/sdk/client/
 const mcp = new Client({ name: "reinpay-live-test", version: "0.0.0" });
 await mcp.connect(new StdioClientTransport({ command: process.execPath, args: [fileURLToPath(new URL("../bin/reinpay.js", import.meta.url)), "mcp"], env: { ...process.env, REINPAY_HOME: home } }));
 const names = (await mcp.listTools()).tools.map((t) => t.name).sort();
-check(`the agent gets 11 tools (${names.join(", ")})`, names.join() === "check_payment,freeze_wallet,get_receipt,get_rules,list_receipts,read_payment_link,request_payment,review_rules,spending_report,verify_receipt,wallet_status");
+check(`the agent gets 12 tools (${names.join(", ")})`, names.join() === "check_payment,check_x402,freeze_wallet,get_receipt,get_rules,list_receipts,read_payment_link,request_payment,review_rules,spending_report,verify_receipt,wallet_status");
 check("no tool can approve, reject or change rules or payees", !names.some((n) => /approve|reject|rule_set|payee|unlock|autosend/.test(n)));
 const call = async (name, args = {}) => { const r = await mcp.callTool({ name, arguments: args }); return { err: !!r.isError, text: r.content.map((x) => x.text).join("") }; };
 const rules = JSON.parse((await call("get_rules")).text);
@@ -294,7 +294,7 @@ check("statement check: signed by its wallet, but claiming someone else's paymen
 const ro = new Client({ name: "reinpay-live-test-ro", version: "0.0.0" });
 await ro.connect(new StdioClientTransport({ command: process.execPath, args: [fileURLToPath(new URL("../bin/reinpay.js", import.meta.url)), "mcp", "--read-only"], env: { ...process.env, REINPAY_HOME: home } }));
 const roNames = (await ro.listTools()).tools.map((t) => t.name).sort();
-check(`read-only MCP: ${roNames.length} tools, no request_payment`, roNames.length === 10 && !roNames.includes("request_payment"), roNames.join(", "));
+check(`read-only MCP: ${roNames.length} tools, no request_payment`, roNames.length === 11 && !roNames.includes("request_payment"), roNames.join(", "));
 const roTry = await ro.callTool({ name: "request_payment", arguments: { payee: "Test payee", amount: "0.0001", token: "ETH", memo: "x" } }).catch((e) => ({ isError: true, content: [{ text: e.message }] }));
 check("read-only MCP: asking for a payment is refused", !!roTry.isError);
 await ro.close();
@@ -377,5 +377,15 @@ const mf = await rq("Test payee", "0.0001", "ETH", "fee test");
 check("max fee of 1 wei: the real mainnet fee is above it, so the payment is blocked by the network fee rule", mf.status === "blocked" && mf.rule === "network fee", mf.reason);
 { const c0 = C.loadConfig(); delete c0.rules.maxFeeEth; C.saveConfig(c0); }
 
+
+// ---- 0.52: reinpay x402 check against a local service that answers 402 (v2 header), then the real dry run ----
+{ const http = await import("node:http");
+  const req402 = { x402Version: 2, resource: { url: "http://127.0.0.1/report", description: "One market report" }, accepts: [{ scheme: "exact", network: "eip155:4663", amount: "10000", asset: TOKENS.USDG.address, payTo: OTHER, maxTimeoutSeconds: 60, extra: { name: "Global Dollar", version: "1" } }] };
+  const srv = http.createServer((q, s) => { s.writeHead(402, { "PAYMENT-REQUIRED": Buffer.from(JSON.stringify(req402)).toString("base64"), "content-type": "application/json" }); s.end("{}"); });
+  await new Promise((r) => srv.listen(0, "127.0.0.1", r));
+  const n0 = (await import("../src/receipts.js")).allReceipts().length;
+  const xr = await (await import("../src/x402.js")).checkX402(`http://127.0.0.1:${srv.address().port}/report`);
+  srv.close();
+  check("x402 check: a 402 for 0.01 USDG to a payee on the list goes through the rules and a real mainnet dry run, nothing recorded", xr.needsPayment && xr.payee === "USDG only" && xr.amount === "0.01" && xr.token === "USDG" && !!xr.rule && (await import("../src/receipts.js")).allReceipts().length === n0, `${xr.wouldBe}: ${xr.rule}`); }
 console.log(`\n${pass} passed, ${fail} failed. No transaction was signed or sent.`);
 process.exit(fail ? 1 : 0);

@@ -71,6 +71,7 @@ const HELP = `reinpay ${pkg.version} - a wallet for AI agents that only spends i
   reinpay payee export [--out=file.json]   Your payee list, signed with your wallet key, to share
   reinpay payee import <file.json>         Add payees from a signed list, after the same checks as payee add
   reinpay payee check <0xaddress>         Read an address from the chain before you add it: wallet or contract, history, Sourcify, lookalikes
+  reinpay x402 check <url> [--memo=]      What an x402 service asks to be paid, and what your rules would say; pays nothing
   reinpay payee rename <name> <new name>  Rename a payee (and the schedules that pay it); the address and limits stay
   reinpay payee cooldown <name> <minutes|off>   At least this long between payments to one payee (sent or waiting)
   reinpay payee list | remove <name> | off <name> | on <name>
@@ -333,6 +334,12 @@ async function main() {
     console.log(`\n${r.files} files, ${r.pass} checks passed, ${r.fail} failed, in ${r.seconds} s. ${r.ok ? "Reinpay works on this computer." : "Something is wrong: run the failing file with node to see more."}`);
     if (!r.ok) process.exit(1);
     return;
+  }
+  if (cmd === "x402") {
+    if (pos[0] !== "check" || !pos[1]) throw new Error("Usage: reinpay x402 check <url> [--memo=...] [--json]");
+    const { checkX402, x402Lines } = await import("../src/x402.js");
+    const r = await checkX402(pos[1], { memo: opt("memo") });
+    return console.log(flags.has("--json") ? JSON.stringify(r, null, 2) : x402Lines(r).join("\n"));
   }
   if (cmd === "lab" && pos[0] === "run") {
     const { runLab, ROWS } = await import("../src/lab.js");

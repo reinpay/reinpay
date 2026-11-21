@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.52.0 (unreleased): x402 check
+
+- `reinpay x402 check <url> [--memo=] [--json]` and the `check_x402` tool: what an x402 service asks to be paid (v1 body or v2 `PAYMENT-REQUIRED` header), on Robinhood Chain, against your payee list and rules, with the same mainnet dry run as `reinpay check`. Pays nothing, signs nothing.
+- The agent now has 12 tools, 11 in read-only mode.
+- Tests: 15 checks offline, 1 on mainnet.
+
 ## 0.51.1 (unreleased): check your rules
 
 - `src/labcore.js`: the pure part of Reinpay Lab, plus `checkOffline` to run the scams against any rules with the rules engine alone; reinpay.app/lab uses it in the browser for "Check your rules".

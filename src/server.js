@@ -38,6 +38,8 @@ export const TOOLS = [
     { payee: z.string().describe("Payee name exactly as get_rules lists it"), amount: z.string().describe("Amount as decimal text"), token: z.string().max(11).optional().describe("Token symbol, default USDG"), memo: z.string().max(200).optional().describe("The memo you would send, so the memo rule is checked too"), explain: z.boolean().optional().describe("Also return every rule in order with what it found, so you can tell the user exactly why") }, READ, (a) => previewPayment(a)],
   ["read_payment_link", "Read a payment link", "Read an ethereum: payment link (EIP-681) someone gave you: who it pays, how much, which token, and whether that payee is on the owner's list. It pays nothing. If it is on the list, call request_payment with the payee name it returns.",
     { link: z.string().max(400).describe("The ethereum:0x… link") }, READ, (a) => readLink(a.link, loadConfig())],
+  ["check_x402", "Check an x402 payment", "Before paying a service that answered 402 Payment Required (x402): read what it asks for (amount, token, who gets paid, on which network), whether that address is on the owner's payee list, and what the rules would say, with a mainnet simulation of the transfer when the rules let it through. It pays nothing and signs nothing. If the address is not on the list, tell the user; only the owner can add payees.",
+    { url: z.string().max(500).describe("The URL that answered 402"), memo: z.string().max(200).optional().describe("What the payment would be for") }, READ, async (a) => (await import("./x402.js")).checkX402(a.url, { memo: a.memo })],
   ["spending_report", "Spending report", "What this wallet sent, what is waiting and what was blocked, per day and token, with the top payees and the rules that blocked most. Use it to answer the user's questions about spending instead of guessing.",
     { days: z.number().int().min(1).max(90).optional().describe("How many days back, today included. Default 7") }, READ, (a) => { syncTokens(); return spendingReport(allReceipts(), { days: a.days || 7 }); }],
   ["review_rules", "Rule suggestions", "Suggestions for the owner's rules, from the receipts: unused payees, budgets that block often or are far too big, requests to strangers, payments left waiting, missing safety switches. You cannot change rules: pass the suggestions and their commands to the user.",
@@ -54,7 +56,7 @@ export const TOOLS = [
 ];
 
 /** Tools that change nothing but the freeze. request_payment is the only tool left out in read-only mode. */
-export const READ_ONLY_TOOLS = ["wallet_status", "get_rules", "check_payment", "read_payment_link", "spending_report", "review_rules", "get_receipt", "verify_receipt", "list_receipts", "freeze_wallet"];
+export const READ_ONLY_TOOLS = ["wallet_status", "get_rules", "check_payment", "check_x402", "read_payment_link", "spending_report", "review_rules", "get_receipt", "verify_receipt", "list_receipts", "freeze_wallet"];
 
 export function buildServer({ readOnly = false, session = null } = {}) {
   SESSION = session ? newSession(session) : null;
